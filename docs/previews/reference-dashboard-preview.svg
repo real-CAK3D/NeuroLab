@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1408" height="768" viewBox="0 0 1408 768">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#dfe9ee"/>
+      <stop offset="1" stop-color="#bfcdd4"/>
+    </linearGradient>
+    <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse">
+      <rect width="26" height="26" fill="#d9e4e8"/>
+      <path d="M 26 0 L 0 0 0 26" fill="none" stroke="#91a3ab" stroke-width="1"/>
+    </pattern>
+    <style>
+      .title { font: 800 26px Arial, sans-serif; fill: #050607; letter-spacing: -1px; }
+      .subtitle { font: 800 20px Arial, sans-serif; fill: #050607; }
+      .label { font: 700 14px Arial, sans-serif; fill: #050607; }
+      .tiny { font: 700 12px Arial, sans-serif; fill: #1c2b30; }
+      .panel { fill: rgba(237,245,248,.52); stroke: #0d1518; stroke-width: 2; }
+      .cut { fill: none; stroke: #0d1518; stroke-width: 2; }
+      .card { fill: #d4e0e5; stroke: #8b9ca4; stroke-width: 1; }
+      .black { stroke: #050607; stroke-width: 5; }
+      .wall { fill: #dce8ea; stroke: #050607; stroke-width: 4; }
+      .screen { fill: #173238; stroke: #344b52; stroke-width: 3; }
+      .screenLine { fill: none; stroke: #69d7ba; stroke-width: 3; }
+      .green { fill: #5aa75e; stroke: #1d4c2b; stroke-width: 2; }
+      .accent { fill: #47b899; }
+    </style>
+  </defs>
+
+  <rect width="1408" height="768" fill="url(#bg)"/>
+
+  <g transform="translate(24 22)">
+    <text class="title" x="14" y="24">CHARACTER ROSTER <tspan class="subtitle">(ANIMATED SPRITE COLLECTION)</tspan></text>
+    <path class="panel" d="M0 36 H690 Q704 36 704 50 V274 Q704 286 692 286 H10 Q0 286 0 274 Z"/>
+    <g transform="translate(14 70)">
+      <rect width="676" height="174" fill="url(#grid)" stroke="#94a6ae"/>
+      <g id="sprite">
+        <ellipse cx="0" cy="104" rx="24" ry="7" fill="#87939a" opacity=".45"/>
+        <rect x="-14" y="44" width="28" height="50" rx="8" fill="#20282d" stroke="#0b0f11" stroke-width="3"/>
+        <circle cx="0" cy="28" r="17" fill="#e7ba91" stroke="#0b0f11" stroke-width="3"/>
+        <path d="M-17 26 Q0 2 17 26 V15 Q0 2 -17 15 Z" fill="#111"/>
+        <rect x="-18" y="92" width="13" height="36" rx="4" fill="#20282d" stroke="#0b0f11" stroke-width="3"/>
+        <rect x="5" y="92" width="13" height="36" rx="4" fill="#20282d" stroke="#0b0f11" stroke-width="3"/>
+      </g>
+      <g transform="translate(48 18)"><use href="#sprite"/><text class="label" text-anchor="middle" x="0" y="198">The Boss</text></g>
+      <g transform="translate(146 18)"><use href="#sprite"/><rect x="-14" y="44" width="28" height="50" rx="8" fill="#263d5b"/><text class="label" text-anchor="middle" x="0" y="198">Boss Exec</text></g>
+      <g transform="translate(244 18)"><use href="#sprite"/><rect x="-14" y="44" width="28" height="50" rx="8" fill="#eff7f5"/><rect x="-17" y="12" width="34" height="12" fill="#4aa86b"/><text class="label" text-anchor="middle" x="0" y="198">Cultivation</text></g>
+      <g transform="translate(342 18)"><use href="#sprite"/><rect x="-14" y="44" width="28" height="50" rx="8" fill="#eff7f5"/><text class="label" text-anchor="middle" x="0" y="198">Operations</text></g>
+      <g transform="translate(440 18)"><use href="#sprite"/><rect x="-14" y="44" width="28" height="50" rx="8" fill="#4aa86b"/><rect x="-17" y="12" width="34" height="12" fill="#4aa86b"/><text class="label" text-anchor="middle" x="0" y="198">Worker</text></g>
+      <g transform="translate(538 18)"><use href="#sprite"/><rect x="-14" y="44" width="28" height="50" rx="8" fill="#53a7d8"/><text class="label" text-anchor="middle" x="0" y="198">Processing</text></g>
+      <g transform="translate(636 18)"><use href="#sprite"/><rect x="-14" y="44" width="28" height="50" rx="8" fill="#1d2d38"/><text class="label" text-anchor="middle" x="0" y="198">Security</text></g>
+    </g>
+  </g>
+
+  <g transform="translate(752 22)">
+    <text class="title" x="14" y="24">INTERIOR DECOR <tspan class="subtitle">(PROPS &amp; SYSTEMS)</tspan></text>
+    <path class="panel" d="M0 36 H622 Q636 36 636 50 V426 Q636 440 622 440 H14 Q0 440 0 426 Z"/>
+    <g transform="translate(38 74)">
+      <rect class="screen" x="0" y="0" width="75" height="62"/><polyline class="screenLine" points="9,42 26,26 42,35 63,16"/>
+      <rect class="screen" x="84" y="-10" width="116" height="84"/><polyline fill="none" stroke="#e87265" stroke-width="3" points="12,60 34,45 51,54 76,30 100,20"/>
+      <rect class="screen" x="210" y="0" width="72" height="62"/><rect x="226" y="18" width="10" height="34" fill="#66d26f"/><rect x="244" y="30" width="10" height="22" fill="#66d26f"/><rect x="262" y="10" width="10" height="42" fill="#66d26f"/>
+      <g transform="translate(360 0)"><rect width="96" height="60" fill="#e8eef1" stroke="#59676d" stroke-width="3"/><rect class="screen" x="18" y="8" width="60" height="28"/><rect x="26" y="42" width="44" height="8" fill="#b0bec4"/></g>
+      <g transform="translate(488 -8)"><rect width="68" height="96" fill="#7f8c92" stroke="#2b373c" stroke-width="4"/><rect x="11" y="12" width="46" height="12" fill="#24383e"/><rect x="11" y="34" width="46" height="12" fill="#24383e"/><rect x="11" y="56" width="46" height="12" fill="#24383e"/></g>
+      <g transform="translate(14 166)"><path d="M0 20 H160 M22 20 V66 M66 20 V66 M110 20 V66 M154 20 V66" stroke="#50656c" stroke-width="7" fill="none"/><circle cx="22" cy="74" r="7" fill="#c54f4f"/><circle cx="66" cy="74" r="7" fill="#d7a34b"/><circle cx="110" cy="74" r="7" fill="#5ca4d8"/><circle cx="154" cy="74" r="7" fill="#63ad65"/></g>
+      <g transform="translate(270 166)"><rect width="160" height="62" fill="#b9c5c9" stroke="#52636a" stroke-width="4"/><path d="M12 12 H148 M12 28 H148 M12 44 H148" stroke="#879ba3"/><circle cx="32" cy="70" r="8" fill="#57666c"/><circle cx="128" cy="70" r="8" fill="#57666c"/></g>
+      <g transform="translate(482 140)"><rect x="20" y="0" width="52" height="150" rx="18" fill="#d7dde0" stroke="#536269" stroke-width="4"/><text x="46" y="88" font="700 32px Arial" fill="#5b666b" text-anchor="middle">CO2</text><path d="M72 26 C108 26 108 80 80 80" fill="none" stroke="#536269" stroke-width="5"/></g>
+      <g transform="translate(520 158)"><rect width="70" height="124" fill="#eef4f3" stroke="#6e7e84" stroke-width="4"/><rect x="12" y="24" width="46" height="20" class="green"/><rect x="12" y="58" width="46" height="20" class="green"/></g>
+    </g>
+  </g>
+
+  <g transform="translate(24 340)">
+    <text class="title" x="14" y="24">ROOM TEMPLATES <tspan class="subtitle">(UNFURNISHED ZONES)</tspan></text>
+    <path class="panel" d="M0 36 H690 Q704 36 704 50 V394 Q704 408 690 408 H14 Q0 408 0 394 Z"/>
+    <g transform="translate(14 72)">
+      <rect class="wall" x="0" y="0" width="170" height="210"/><rect x="12" y="14" width="146" height="184" fill="#27343a"/><rect x="78" y="36" width="64" height="9" fill="#dff6f4"/>
+      <rect class="wall" x="170" y="0" width="150" height="210"/><rect x="182" y="14" width="126" height="184" fill="url(#grid)"/><rect x="218" y="36" width="64" height="9" fill="#f5ffff"/>
+      <rect class="wall" x="320" y="0" width="164" height="210"/><rect x="332" y="14" width="140" height="184" fill="#dce9ec"/><rect x="372" y="52" width="70" height="46" fill="#abc3c8" stroke="#576970" stroke-width="3"/>
+      <rect class="wall" x="484" y="0" width="180" height="210"/><rect x="496" y="14" width="156" height="184" fill="#b9b6ac"/><rect x="540" y="58" width="76" height="46" fill="#9aa3a4" stroke="#4b5659" stroke-width="4"/>
+      <g transform="translate(18 242)"><rect width="126" height="54" fill="#e6ecee" stroke="#52636a" stroke-width="3"/><path d="M52 28 L86 16" stroke="#c55244" stroke-width="4"/><circle cx="54" cy="29" r="6" fill="#5fac63"/></g>
+      <g transform="translate(215 245)"><rect width="78" height="64" fill="#c49b5f" stroke="#7a5a33" stroke-width="4"/><rect x="-8" y="50" width="90" height="12" fill="#8a6b43"/></g>
+      <g transform="translate(370 245)"><rect width="96" height="68" fill="#c9d1d5" stroke="#68767b" stroke-width="4"/><rect x="58" y="18" width="20" height="22" fill="#56b766"/></g>
+      <g transform="translate(548 242)"><rect width="96" height="78" fill="#c9d1d5" stroke="#68767b" stroke-width="4"/><circle cx="54" cy="40" r="26" fill="none" stroke="#56666b" stroke-width="8"/></g>
+    </g>
+  </g>
+
+  <g transform="translate(752 486)">
+    <text class="title" x="0" y="0">PLANT LIFECYCLE <tspan class="subtitle">(STRAIN PHENOTYPES)</tspan></text>
+    <path class="panel" d="M0 14 H622 Q636 14 636 28 V256 Q636 270 622 270 H0 Z"/>
+    <rect x="18" y="46" width="596" height="144" fill="url(#grid)" stroke="#95a7af"/>
+    <g transform="translate(48 76)">
+      <rect x="-20" y="84" width="48" height="24" fill="#cbb087" stroke="#684f35"/><path d="M0 82 C-18 58 -2 44 5 34 C11 50 26 54 14 82 Z" class="green"/>
+      <text class="label" x="4" y="136" text-anchor="middle">Clone</text>
+      <g transform="translate(108 0)"><rect x="-26" y="82" width="52" height="26" fill="#cbb087" stroke="#684f35"/><circle class="green" cx="-8" cy="70" r="22"/><circle class="green" cx="12" cy="62" r="24"/><text class="label" x="0" y="136" text-anchor="middle">Vegetative</text></g>
+      <g transform="translate(240 0)"><rect x="-34" y="84" width="68" height="26" fill="#cbb087" stroke="#684f35"/><circle class="green" cx="-22" cy="54" r="28"/><circle class="green" cx="0" cy="32" r="34"/><circle class="green" cx="25" cy="58" r="28"/><text class="label" x="0" y="136" text-anchor="middle">Mother</text></g>
+      <g transform="translate(370 0)"><rect x="-26" y="84" width="54" height="26" fill="#cbb087" stroke="#684f35"/><circle cx="-14" cy="56" r="25" fill="#9ac46f" stroke="#456d35"/><circle cx="10" cy="44" r="31" fill="#b8cf72" stroke="#456d35"/><text class="label" x="0" y="136" text-anchor="middle">Flowering</text></g>
+      <g transform="translate(506 0)"><rect x="-26" y="84" width="54" height="26" fill="#cbb087" stroke="#684f35"/><circle cx="-10" cy="54" r="31" fill="#bfd5ba" stroke="#557353"/><circle cx="16" cy="44" r="33" fill="#a8c9a5" stroke="#557353"/><text class="label" x="0" y="136" text-anchor="middle">Harvest</text></g>
+    </g>
+  </g>
+</svg>

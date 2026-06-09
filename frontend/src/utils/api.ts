@@ -1,0 +1,152 @@
+import { createIntercomMessageSchema, createTaskSchema } from "../../../shared/index";
+import type { BootstrapPayload, CreateIntercomMessageInput, CreateTaskInput, Employee, IntercomMessage, Room, Task } from "../types/domain";
+
+const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:3006";
+
+export type HostStats = {
+  hostname: string;
+  platform: string;
+  uptimeSeconds: number;
+  cpu: {
+    model: string;
+    cores: number;
+    speedMHz: number;
+    usedPercent: number;
+  };
+  memory: {
+    totalBytes: number;
+    freeBytes: number;
+    usedBytes: number;
+    usedPercent: number;
+  };
+  loadAverage: number[];
+  sensors: {
+    temperatureC: number | null;
+    fanRpm: number | null;
+    note: string;
+  };
+  sampledAt: string;
+};
+
+export type DockerStats = {
+  available: boolean;
+  running: number;
+  containers: Array<{
+    id: string;
+    name: string;
+    image: string;
+    status: string;
+    ports: string;
+    cpuPercent: string;
+    memoryUsage: string;
+    memoryPercent: string;
+    networkIo: string;
+    blockIo: string;
+  }>;
+  error?: string;
+  sampledAt: string;
+};
+
+export type OllamaModel = {
+  name: string;
+  model: string;
+  size: number;
+  modifiedAt: string;
+  details: Record<string, unknown>;
+};
+
+export type OllamaModels = {
+  available: boolean;
+  models: OllamaModel[];
+  error?: string;
+};
+
+export type FacilityDeviceTelemetry = {
+  id: string;
+  displayName: string;
+  roomId: string;
+  sourcePath: string;
+  hostname: string;
+  online: boolean;
+  stale: boolean;
+  sampledAt: string | null;
+  statusFlag: string;
+  temperatureC: number | null;
+  cpuPercent: number | null;
+  speedMHz: number | null;
+  memoryPercent: number | null;
+  swapPercent: number | null;
+  totalMemoryBytes: number | null;
+  pingMs: number | null;
+  note: string;
+};
+
+export type FacilityDevices = {
+  inbox: string;
+  sampledAt: string;
+  devices: FacilityDeviceTelemetry[];
+};
+
+export async function getBootstrap(): Promise<BootstrapPayload> {
+  return fetchJson(`${backendUrl}/api/bootstrap`);
+}
+
+export async function getEmployee(id: number): Promise<Employee> {
+  return fetchJson(`${backendUrl}/api/employees/${id}`);
+}
+
+export async function getRoom(id: number): Promise<Room> {
+  return fetchJson(`${backendUrl}/api/rooms/${id}`);
+}
+
+export async function createTask(input: CreateTaskInput): Promise<Task> {
+  const parsed = createTaskSchema.parse(input);
+  return fetchJson(`${backendUrl}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(parsed),
+  });
+}
+
+export async function getIntercomHistory(): Promise<IntercomMessage[]> {
+  return fetchJson(`${backendUrl}/api/intercom`);
+}
+
+export async function sendIntercom(input: CreateIntercomMessageInput): Promise<IntercomMessage> {
+  const parsed = createIntercomMessageSchema.parse(input);
+  return fetchJson(`${backendUrl}/api/intercom`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(parsed),
+  });
+}
+
+export async function chatWithOllama(input: { model: string; message: string }): Promise<{ response: string; model: string }> {
+  return fetchJson(`${backendUrl}/api/ollama/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getHostStats(): Promise<HostStats> {
+  return fetchJson(`${backendUrl}/api/system/host`);
+}
+
+export async function getDockerStats(): Promise<DockerStats> {
+  return fetchJson(`${backendUrl}/api/system/docker`);
+}
+
+export async function getOllamaModels(): Promise<OllamaModels> {
+  return fetchJson(`${backendUrl}/api/ollama/models`);
+}
+
+export async function getFacilityDevices(): Promise<FacilityDevices> {
+  return fetchJson(`${backendUrl}/api/system/facility-devices`);
+}
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+  return response.json() as Promise<T>;
+}

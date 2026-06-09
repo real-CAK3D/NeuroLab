@@ -1,0 +1,15 @@
+{
+  "placeholderSpriteSet": "clean-room-rpg-placeholder-v1",
+  "characterWidth": 28,
+  "characterHeight": 40,
+  "departments": {
+    "Boss": "#f6c85f",
+    "Managers": "#61d6ff",
+    "Cultivation": "#39d98a",
+    "Processing": "#f59f52",
+    "R&D": "#bda1ff",
+    "Security": "#ff6b6b",
+    "Logistics": "#f6d365",
+    "Sales": "#45d6c8"
+  }
+}

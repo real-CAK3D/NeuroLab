@@ -1,0 +1,9 @@
+{
+  "simulationTickMs": 3000,
+  "renderTickMs": 16.67,
+  "infrastructurePollingMs": 10000,
+  "aiReportGenerationMs": 30000,
+  "managerReportIntervalTicks": 10,
+  "bossBriefingIntervalTicks": 20,
+  "employeeDecisionIntervalTicks": 1
+}

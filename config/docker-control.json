@@ -1,0 +1,5 @@
+{
+  "enableDockerControl": false,
+  "allowlistedContainers": [],
+  "requireConfirmation": true
+}

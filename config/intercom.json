@@ -1,0 +1,7 @@
+{
+  "defaultSender": "Boss Console",
+  "requiresAcknowledgementAt": "HIGH",
+  "generatedTaskSource": "intercom",
+  "priorities": ["LOW", "NORMAL", "HIGH", "EMERGENCY"],
+  "targetTypes": ["GLOBAL", "DEPARTMENT", "EMPLOYEE", "MANAGER", "EMERGENCY"]
+}

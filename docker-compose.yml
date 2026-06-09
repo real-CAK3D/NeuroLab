@@ -1,0 +1,96 @@
+services:
+  neurolab-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: neurolab-backend
+    env_file: .env.example
+    environment:
+      PORT: 3006
+      DATABASE_PATH: /data/neurolab.sqlite
+      WEBSOCKET_URL: http://neurolab-websocket:3007
+    ports:
+      - "3006:3006"
+    volumes:
+      - neurolab_database:/data
+      - neurolab_config:/config
+      - neurolab_logs:/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3006/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+  neurolab-websocket:
+    build:
+      context: .
+      dockerfile: websocket/Dockerfile
+    container_name: neurolab-websocket
+    env_file: .env.example
+    environment:
+      PORT: 3007
+      DATABASE_PATH: /data/neurolab.sqlite
+      SIMULATION_TICK_MS: 3000
+    ports:
+      - "3007:3007"
+    volumes:
+      - neurolab_database:/data
+      - neurolab_config:/config
+      - neurolab_logs:/logs
+    depends_on:
+      - neurolab-backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3007/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+  neurolab-ai:
+    build:
+      context: .
+      dockerfile: ai-service/Dockerfile
+    container_name: neurolab-ai
+    env_file: .env.example
+    environment:
+      PORT: 3008
+    ports:
+      - "3008:3008"
+    volumes:
+      - neurolab_logs:/logs
+
+  neurolab-monitor:
+    build:
+      context: .
+      dockerfile: monitor-service/Dockerfile
+    container_name: neurolab-monitor
+    env_file: .env.example
+    environment:
+      PORT: 3009
+    ports:
+      - "3009:3009"
+    volumes:
+      - neurolab_logs:/logs
+
+  neurolab-frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: neurolab-frontend
+    env_file: .env.example
+    environment:
+      VITE_BACKEND_URL: http://localhost:3006
+      VITE_WEBSOCKET_URL: http://localhost:3007
+      VITE_AI_URL: http://localhost:3008
+      VITE_MONITOR_URL: http://localhost:3009
+    ports:
+      - "3005:3005"
+    depends_on:
+      - neurolab-backend
+      - neurolab-websocket
+      - neurolab-ai
+      - neurolab-monitor
+
+volumes:
+  neurolab_database:
+  neurolab_config:
+  neurolab_logs:

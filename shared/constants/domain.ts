@@ -1,0 +1,72 @@
+export const EMPLOYEE_STATES = [
+  "IDLE",
+  "WORKING",
+  "MOVING",
+  "CLEANING",
+  "RESTING",
+  "SOCIALIZING",
+  "REPORTING",
+  "ALERT",
+  "THINKING",
+  "COMPLAINING",
+  "WAITING",
+  "ON_BREAK",
+  "TALKING",
+  "ASSIGNED",
+] as const;
+
+export const ALERT_LEVELS = ["INFO", "NOTICE", "WARNING", "CRITICAL", "RESOLVED"] as const;
+
+export const ALERT_CATEGORIES = [
+  "SYSTEM",
+  "DOCKER",
+  "CPU",
+  "MEMORY",
+  "DISK",
+  "NETWORK",
+  "TASK",
+  "EMPLOYEE",
+  "DEPARTMENT",
+  "AI",
+  "SECURITY",
+] as const;
+
+export const TASK_STATUSES = [
+  "QUEUED",
+  "ASSIGNED",
+  "IN_PROGRESS",
+  "BLOCKED",
+  "COMPLETED",
+  "CANCELLED",
+] as const;
+
+export const TASK_PRIORITIES = ["LOW", "NORMAL", "HIGH", "URGENT"] as const;
+
+export const INTERCOM_TARGET_TYPES = ["GLOBAL", "DEPARTMENT", "EMPLOYEE", "MANAGER", "EMERGENCY"] as const;
+
+export const INTERCOM_PRIORITIES = ["LOW", "NORMAL", "HIGH", "EMERGENCY"] as const;
+
+export const REPORT_TYPES = [
+  "TASK_UPDATE",
+  "ISSUE_REPORT",
+  "SUPPLY_REQUEST",
+  "WORKLOAD_WARNING",
+  "EMPLOYEE_COMPLAINT",
+  "OPTIMIZATION_SUGGESTION",
+  "SYSTEM_ALERT",
+  "MANAGER_SUMMARY",
+  "BOSS_BRIEFING",
+] as const;
+
+export const EVENT_TYPES = [
+  "INFRASTRUCTURE",
+  "SIMULATION",
+  "ALERT",
+  "EMPLOYEE_UPDATED",
+  "TASK_CREATED",
+  "INTERCOM",
+  "MANAGER_REPORT",
+  "BOSS_BRIEFING",
+  "AI_MESSAGE",
+  "SYSTEM",
+] as const;

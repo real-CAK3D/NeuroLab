@@ -1,0 +1,6 @@
+{
+  "enableOllama": false,
+  "ollamaBaseUrl": "http://localhost:11434",
+  "model": "llama3.1",
+  "timeoutMs": 10000
+}

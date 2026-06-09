@@ -1,0 +1,11 @@
+{
+  "cpuNotice": 75,
+  "cpuWarning": 85,
+  "cpuCritical": 95,
+  "ramNotice": 70,
+  "ramWarning": 85,
+  "ramCritical": 95,
+  "diskNotice": 75,
+  "diskWarning": 85,
+  "diskCritical": 95
+}
