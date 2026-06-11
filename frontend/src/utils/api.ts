@@ -87,6 +87,31 @@ export type FacilityDevices = {
   devices: FacilityDeviceTelemetry[];
 };
 
+export type FacilityLayoutRoom = {
+  id: string;
+  label: string;
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  doors: Array<{ side: "top" | "right" | "bottom" | "left"; at: number; size?: number }>;
+};
+
+export type FacilityLayoutSnapshot = {
+  id: string;
+  savedAt: string;
+  note: string;
+  rooms: FacilityLayoutRoom[];
+  drafts: Record<string, unknown>;
+  validation: { failures: string[]; warnings: string[] };
+};
+
+export type FacilityLayoutState = {
+  current: FacilityLayoutSnapshot | null;
+  history: FacilityLayoutSnapshot[];
+};
+
 export async function getBootstrap(): Promise<BootstrapPayload> {
   return fetchJson(`${backendUrl}/api/bootstrap`);
 }
@@ -143,6 +168,22 @@ export async function getOllamaModels(): Promise<OllamaModels> {
 
 export async function getFacilityDevices(): Promise<FacilityDevices> {
   return fetchJson(`${backendUrl}/api/system/facility-devices`);
+}
+
+export async function getFacilityLayoutSnapshot(): Promise<FacilityLayoutState> {
+  return fetchJson(`${backendUrl}/api/facility-layout`);
+}
+
+export async function applyFacilityLayoutSnapshot(input: { rooms: FacilityLayoutRoom[]; drafts: Record<string, unknown>; note?: string }): Promise<FacilityLayoutState> {
+  return fetchJson(`${backendUrl}/api/facility-layout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function undoFacilityLayoutSnapshot(): Promise<FacilityLayoutState> {
+  return fetchJson(`${backendUrl}/api/facility-layout/undo`, { method: "POST" });
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

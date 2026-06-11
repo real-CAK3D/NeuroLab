@@ -53,6 +53,52 @@ export function apiRouter(): Router {
     });
   });
 
+  router.get("/facility-layout", (_req: Request, res: Response) => {
+    res.json(readFacilityLayoutState());
+  });
+
+  router.post("/facility-layout", (req: Request, res: Response) => {
+    const validation = validateFacilityLayoutSnapshot(req.body);
+    if (validation.failures.length) return res.status(400).json({ error: "Invalid facility layout snapshot", failures: validation.failures });
+
+    const current = readFacilityLayoutState();
+    const snapshot = {
+      id: `layout-${Date.now()}`,
+      savedAt: new Date().toISOString(),
+      note: typeof req.body?.note === "string" ? req.body.note.slice(0, 160) : "Facility editor apply",
+      rooms: req.body.rooms,
+      drafts: req.body.drafts ?? {},
+      validation,
+    };
+    const history = [current.current, ...current.history].filter(Boolean).slice(0, 12);
+    writeSetting("facility_layout_current", snapshot);
+    writeSetting("facility_layout_history", history);
+    eventBus.publish({
+      type: "FACILITY_LAYOUT",
+      message: `Facility layout snapshot saved: ${snapshot.note}`,
+      entity_type: "facility-layout",
+      entity_id: null,
+      payload: snapshot,
+    });
+    res.status(201).json({ current: snapshot, history });
+  });
+
+  router.post("/facility-layout/undo", (_req: Request, res: Response) => {
+    const state = readFacilityLayoutState();
+    const [previous, ...remaining] = state.history as Array<Record<string, any>>;
+    if (!previous) return res.status(409).json({ error: "No facility layout snapshot is available to restore" });
+    writeSetting("facility_layout_current", previous);
+    writeSetting("facility_layout_history", remaining);
+    eventBus.publish({
+      type: "FACILITY_LAYOUT",
+      message: `Facility layout snapshot restored: ${previous.note ?? previous.id}`,
+      entity_type: "facility-layout",
+      entity_id: null,
+      payload: previous,
+    });
+    res.json({ current: previous, history: remaining });
+  });
+
   router.get("/system/host", async (_req: Request, res: Response) => {
     const cpu = await sampleCpuUsage();
     const totalMemory = os.totalmem();
@@ -89,10 +135,12 @@ export function apiRouter(): Router {
       inbox: telemetryInboxPath(),
       sampledAt: new Date().toISOString(),
       devices: await Promise.all([
+        readTelemetryDevice("nukebox", "NukeBox", "mother", process.env.TELEMETRY_NUKEBOX_PATH),
         readTelemetryDevice("hp-laptop", "HP Laptop", "clone"),
         readTelemetryDevice("the-bak3ry", "BAK3RY", "grow1"),
         readTelemetryDevice("hack-safe", "Hack-Safe", "grow2"),
-        readTelemetryDevice("oracle-vm", "The Garden", "grow4"),
+        readTelemetryDevice("oracle-vm", "The Garden", "soil"),
+        readTelemetryDevice("cak3d-creations", "CAK3D-Creations", "vmCreations"),
       ]),
     });
   });
@@ -319,30 +367,83 @@ async function getDockerStats() {
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Docker unavailable";
+    return readTelemetryDockerStats(detail);
+  }
+}
+
+async function readTelemetryDockerStats(cliError: string) {
+  const filePath = process.env.DOCKER_TELEMETRY_PATH || path.join(process.env.TELEMETRY_NUKEBOX_PATH || "/networking/Outbox/nukebox", "docker", "docker_stats.json");
+  try {
+    const telemetry = await readJsonFile(filePath);
+    const status = telemetry.features?.container_status ?? {};
+    const resourceUsage = telemetry.features?.container_resource_usage ?? {};
+    const statusContainers: Array<Record<string, unknown>> = Array.isArray(status.containers) ? status.containers : [];
+    const usageContainers: Array<Record<string, unknown>> = Array.isArray(resourceUsage.containers) ? resourceUsage.containers : [];
+    const containers = statusContainers.map((container: Record<string, unknown>) => {
+      const name = String(container.name ?? container.Names ?? "");
+      const id = String(container.id ?? container.ID ?? "");
+      const usage = usageContainers.find((item: Record<string, unknown>) => {
+        const usageName = String(item.name ?? item.Name ?? "");
+        const usageId = String(item.id ?? item.ID ?? item.Container ?? "");
+        return (name && usageName === name) || (id && usageId === id);
+      }) ?? {};
+      return {
+        id,
+        name,
+        image: String(container.image ?? container.Image ?? ""),
+        status: String(container.status ?? container.Status ?? container.state ?? ""),
+        ports: String(container.ports ?? container.Ports ?? ""),
+        cpuPercent: String(usage.cpu_percent ?? usage.CPUPerc ?? "0%"),
+        memoryUsage: String(usage.memory_usage ?? usage.MemUsage ?? "0B / 0B"),
+        memoryPercent: String(usage.memory_percent ?? usage.MemPerc ?? "0%"),
+        networkIo: String(usage.network_io ?? usage.NetIO ?? "0B / 0B"),
+        blockIo: String(usage.block_io ?? usage.BlockIO ?? "0B / 0B"),
+      };
+    });
+
+    const updatedAt = stringValue(telemetry.updated_at) ?? stringValue(status.collected_at) ?? stringValue(resourceUsage.collected_at) ?? new Date().toISOString();
+    const running = numberValue(status.running) ?? containers.filter((container) => /running|up/i.test(container.status)).length;
+    return {
+      available: Boolean(status.available ?? resourceUsage.available ?? containers.length),
+      source: "telemetry:nukebox",
+      sourceDevice: "nukebox",
+      sourcePath: filePath,
+      version: {},
+      running,
+      total: numberValue(status.total) ?? containers.length,
+      stopped: numberValue(status.stopped) ?? Math.max(0, containers.length - running),
+      containers,
+      sampledAt: updatedAt,
+      note: "Docker CLI is not mounted in the backend container; using read-only NukeBox telemetry.",
+      cliError,
+    };
+  } catch (telemetryError) {
+    const telemetryDetail = telemetryError instanceof Error ? telemetryError.message : "Docker telemetry unavailable";
     return {
       available: false,
+      source: "unavailable",
       running: 0,
       containers: [],
-      error: detail,
+      error: `${cliError}; telemetry fallback failed: ${telemetryDetail}`,
       sampledAt: new Date().toISOString(),
     };
   }
 }
 
 function telemetryInboxPath() {
-  return process.env.TELEMETRY_INBOX_PATH || "C:\\Users\\CAK3D\\OneDrive\\Desktop\\Networking\\Inbox";
+  return process.env.TELEMETRY_INBOX_PATH || "/telemetry-inbox";
 }
 
-async function readTelemetryDevice(folder: string, displayName: string, roomId: string) {
-  const basePath = path.join(telemetryInboxPath(), folder);
+async function readTelemetryDevice(folder: string, displayName: string, roomId: string, explicitPath?: string) {
+  const basePath = explicitPath || path.join(telemetryInboxPath(), folder);
   try {
     const [info, core] = await Promise.all([
       readJsonFile(path.join(basePath, "info.json")),
       readJsonFile(path.join(basePath, "core", "core_stats.json")),
     ]);
-    const updatedAt = stringValue(core.updated_at) ?? stringValue(info.orchestration?.timestamp);
+    const updatedAt = stringValue(core.updated_at) ?? stringValue(core.sampled_at) ?? stringValue(core.timestamp) ?? stringValue(info.orchestration?.timestamp) ?? stringValue(info.sampled_at) ?? stringValue(info.timestamp);
     const ageMs = updatedAt ? Date.now() - new Date(updatedAt).getTime() : Number.POSITIVE_INFINITY;
-    const stale = !Number.isFinite(ageMs) || ageMs > 120_000;
+    const stale = !Number.isFinite(ageMs) || ageMs > 15 * 60_000;
     const declaredOnline = info.status?.online !== false;
     const online = declaredOnline && !stale;
     return {
@@ -356,9 +457,9 @@ async function readTelemetryDevice(folder: string, displayName: string, roomId: 
       sampledAt: updatedAt ?? null,
       statusFlag: stringValue(info.status?.status_flag) ?? (online ? "nominal" : "offline"),
       temperatureC: numberValue(info.status?.temperature_c) ?? temperatureFromCore(core),
-      cpuPercent: numberValue(core.features?.cpu_usage?.total_percent) ?? numberValue(core.features?.cpu_usage?.total_usage_pct),
+      cpuPercent: numberValue(core.features?.cpu_usage?.total_percent) ?? numberValue(core.features?.cpu_usage?.total_usage_pct) ?? numberValue(core.cpu_percent),
       speedMHz: numberValue(core.features?.cpu_speeds?.current_mhz) ?? numberValue(core.features?.cpu_speeds?.per_core_mhz?.[0]?.current),
-      memoryPercent: numberValue(core.features?.ram_and_swap?.ram?.percent) ?? numberValue(core.features?.ram_and_swap?.ram?.used_pct),
+      memoryPercent: numberValue(core.features?.ram_and_swap?.ram?.percent) ?? numberValue(core.features?.ram_and_swap?.ram?.used_pct) ?? numberValue(core.memory_percent),
       swapPercent: numberValue(core.features?.ram_and_swap?.swap?.percent) ?? numberValue(core.features?.ram_and_swap?.swap?.used_pct),
       totalMemoryBytes: numberValue(core.features?.ram_and_swap?.ram?.total) ?? numberValue(core.features?.ram_and_swap?.ram?.total_bytes),
       pingMs: numberValue(info.network?.ping_ms),
@@ -388,7 +489,8 @@ async function readTelemetryDevice(folder: string, displayName: string, roomId: 
 }
 
 async function readJsonFile(filePath: string): Promise<Record<string, any>> {
-  return JSON.parse(await readFile(filePath, "utf8")) as Record<string, any>;
+  const content = await readFile(filePath, "utf8");
+  return JSON.parse(content.replace(/^\uFEFF/, "")) as Record<string, any>;
 }
 
 function stringValue(value: unknown) {
@@ -413,6 +515,55 @@ function parseDockerLine(line: string) {
   } catch {
     return undefined;
   }
+}
+
+function readFacilityLayoutState() {
+  return {
+    current: readSetting("facility_layout_current", null),
+    history: readSetting("facility_layout_history", []),
+  };
+}
+
+function readSetting<T>(key: string, fallback: T): T {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row ? safeJson(row.value, fallback) : fallback;
+}
+
+function writeSetting(key: string, value: unknown) {
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, JSON.stringify(value));
+}
+
+function validateFacilityLayoutSnapshot(input: any) {
+  const failures: string[] = [];
+  const warnings: string[] = [];
+  const rooms = Array.isArray(input?.rooms) ? input.rooms : [];
+  if (!rooms.length) failures.push("rooms must be a non-empty array");
+  const ids = new Set<string>();
+  for (const [index, room] of rooms.entries()) {
+    const tag = typeof room?.id === "string" && room.id ? room.id : `room[${index}]`;
+    if (typeof room?.id !== "string" || !room.id.trim()) failures.push(`${tag} missing id`);
+    if (ids.has(room.id)) failures.push(`duplicate room id: ${room.id}`);
+    ids.add(room.id);
+    if (typeof room?.label !== "string" || !room.label.trim()) failures.push(`${tag} missing label`);
+    for (const key of ["x", "y", "w", "h"] as const) if (!Number.isFinite(room?.[key])) failures.push(`${tag} ${key} must be a finite number`);
+    if (Number.isFinite(room?.w) && room.w < 3) failures.push(`${tag} width must be at least 3`);
+    if (Number.isFinite(room?.h) && room.h < 3) failures.push(`${tag} height must be at least 3`);
+    if (Number.isFinite(room?.x) && Number.isFinite(room?.y) && Number.isFinite(room?.w) && Number.isFinite(room?.h)) {
+      if (room.x < 0 || room.y < 0) failures.push(`${tag} cannot start outside map origin`);
+      if (room.x + room.w > 122 || room.y + room.h > 62) failures.push(`${tag} exceeds Gen2 map bounds`);
+    }
+    if (!Array.isArray(room?.doors) || !room.doors.length) warnings.push(`${tag} has no doors`);
+  }
+  for (let i = 0; i < rooms.length; i += 1) {
+    for (let j = i + 1; j < rooms.length; j += 1) {
+      const a = rooms[i];
+      const b = rooms[j];
+      if (![a?.x, a?.y, a?.w, a?.h, b?.x, b?.y, b?.w, b?.h].every(Number.isFinite)) continue;
+      const overlap = a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      if (overlap) failures.push(`rooms overlap: ${a.id ?? i} and ${b.id ?? j}`);
+    }
+  }
+  return { failures, warnings };
 }
 
 function employeeWarnings(employee: Record<string, any>) {

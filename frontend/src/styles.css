@@ -180,7 +180,7 @@ select {
 
 .gen2-info-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px 340px;
+  grid-template-columns: minmax(0, 1.15fr) 280px 340px;
   border: 4px solid #11151d;
   border-top: 0;
   background: #f6eed8;
@@ -202,6 +202,52 @@ select {
   font-size: 0.72rem;
   padding: 0.4rem 0.65rem;
   text-transform: uppercase;
+}
+
+
+.sprite-dialog-mirror {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 54px;
+  background: #f6eed8;
+  color: #11151d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.6rem;
+  padding: 0.35rem 0.55rem;
+  text-transform: uppercase;
+}
+
+.sprite-dialog-mirror > .gen2-npc {
+  transform: scale(1.35);
+  transform-origin: center;
+}
+
+.sprite-dialog-mirror div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sprite-dialog-mirror strong,
+.sprite-dialog-mirror span,
+.sprite-dialog-mirror em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sprite-dialog-mirror em {
+  color: #5e6b65;
+  font-style: normal;
+  font-size: 0.53rem;
+}
+
+.sprite-dialog-mirror.is-empty {
+  grid-template-columns: 1fr;
+  align-content: center;
+  color: #5e6b65;
 }
 
 .gen2-ops-deck {
@@ -1170,44 +1216,9 @@ select {
 
 .role-boss {
   --sheet-x: 0;
-  filter: saturate(0.8) contrast(1.08);
-}
-
-.role-boss::before,
-.role-boss::after {
-  content: "";
-  position: absolute;
-  image-rendering: pixelated;
-  pointer-events: none;
-}
-
-.role-boss::before {
-  left: 4px;
-  top: 1px;
-  width: 8px;
-  height: 4px;
-  background: #f0ead6;
-  box-shadow:
-    -2px 2px 0 #f0ead6,
-    8px 2px 0 #d8d0bd,
-    0 4px 0 #11151d,
-    6px 4px 0 #11151d;
-}
-
-.role-boss::after {
-  left: 4px;
-  top: 8px;
-  width: 8px;
-  height: 6px;
-  background: #f4efe2;
-  box-shadow:
-    0 2px 0 #f4efe2,
-    -1px 2px 0 #f4efe2,
-    8px 2px 0 #f4efe2,
-    2px 5px 0 #8a5a2b,
-    5px 5px 0 #8a5a2b,
-    1px 7px 0 #11151d,
-    6px 7px 0 #11151d;
+  --hat-color: #f0ead6;
+  --shoe-color: #8a5a2b;
+  filter: saturate(0.92) contrast(1.04);
 }
 
 .role-executive,
@@ -1253,12 +1264,12 @@ select {
   --shoe-color: #6f7f86;
 }
 
-.gen2-npc:not(.role-boss)::before {
+.gen2-npc::before {
   content: "";
   position: absolute;
-  left: 5px;
-  top: 2px;
-  width: 7px;
+  left: 4px;
+  top: 1px;
+  width: 8px;
   height: 3px;
   background: var(--hat-color, #f4efe2);
   box-shadow:
@@ -1269,11 +1280,11 @@ select {
   image-rendering: pixelated;
 }
 
-.gen2-npc:not(.role-boss)::after {
+.gen2-npc::after {
   content: "";
   position: absolute;
   left: 4px;
-  top: 14px;
+  top: 13px;
   width: 3px;
   height: 2px;
   background: var(--shoe-color, #f4efe2);
@@ -1451,7 +1462,7 @@ select {
   padding: 8px 10px;
 }
 
-.grow-ops-title div,
+.grow-ops-title > div:first-child,
 .grow-ops-preview div {
   display: grid;
   gap: 2px;
@@ -1638,6 +1649,237 @@ select {
 .grow-ops-actions .grow-ops-remove {
   background: #d9483d;
   color: #fff2d4;
+}
+
+
+
+.grow-ops-title-controls {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+}
+
+.grow-ops-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.grow-ops-title-actions button.is-active {
+  background: #8ec7d7;
+  box-shadow: inset 2px 2px 0 #ffffff;
+}
+
+.grow-ops-close {
+  min-width: 74px;
+  background: #d9483d !important;
+  color: #fff2d4 !important;
+}
+
+.grow-ops-facility {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.facility-room-list {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  overflow: auto;
+  border-right: 4px solid #11151d;
+  background: #e8f0df;
+  padding: 8px;
+}
+
+.facility-room-list button {
+  display: grid;
+  gap: 2px;
+  border: 3px solid #11151d;
+  background: #fff;
+  color: #11151d;
+  font: inherit;
+  min-height: 46px;
+  padding: 6px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.facility-room-list button.is-active,
+.facility-room-list button:hover,
+.facility-room-list button:focus {
+  background: #8ec7d7;
+  outline: 0;
+}
+
+.facility-room-list b {
+  overflow: hidden;
+  font-size: 0.66rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facility-room-list em,
+.facility-editor-preview em,
+.facility-editor-preview span,
+.facility-editor-summary span {
+  color: #5e6b65;
+  font-size: 0.58rem;
+  font-style: normal;
+}
+
+.facility-editor-form {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.facility-editor-preview {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+  border: 4px solid #11151d;
+  background: #fff;
+  padding: 8px;
+}
+
+.facility-mini-room {
+  position: relative;
+  min-height: 128px;
+  overflow: hidden;
+  border: 4px solid #11151d;
+  box-shadow: inset 0 0 0 4px rgba(17, 21, 29, 0.2);
+}
+
+.facility-mini-room > span {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  z-index: 2;
+  display: inline-block;
+  max-width: calc(100% - 12px);
+  overflow: hidden;
+  background: #f6eed8;
+  border: 2px solid #11151d;
+  color: #11151d;
+  font-size: 0.58rem;
+  padding: 2px 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facility-mini-prop {
+  position: absolute;
+  width: 18px;
+  height: 12px;
+  border: 2px solid #11151d;
+  background: #b7844d;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.16);
+}
+
+.facility-mini-prop.prop-plant,
+.facility-mini-prop.prop-motherPlant {
+  width: 12px;
+  height: 12px;
+  border-radius: 0;
+  background: #4f9d5d;
+}
+
+.facility-mini-prop.prop-terminal,
+.facility-mini-prop.prop-monitor {
+  background: #54b7c8;
+}
+
+.facility-mini-prop.prop-crate,
+.facility-mini-prop.prop-shelf {
+  background: #d7a651;
+}
+
+.facility-editor-preview > div:last-child,
+.facility-editor-summary {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+
+.facility-editor-preview strong {
+  font-size: 0.84rem;
+}
+
+.facility-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.facility-editor-summary {
+  border: 3px solid #11151d;
+  background: #e8f0df;
+  padding: 8px;
+}
+
+
+/* Gen-2 room dressing inspired by the MIT-licensed nikouu/Pokemon-gen-2-style-tilemap reference set. */
+.gen2-room::after,
+.gen2-detail-room::after {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  pointer-events: none;
+  border: 2px solid rgba(17, 21, 29, 0.12);
+  box-shadow: inset 0 0 0 2px rgba(246, 238, 216, 0.22);
+}
+
+.gen2-floor-wood {
+  background-color: #d4a35f;
+  background-image: linear-gradient(90deg, rgba(128, 89, 47, 0.22) 2px, transparent 2px), linear-gradient(rgba(255, 242, 212, 0.2) 2px, transparent 2px);
+  background-size: 16px 16px, 32px 32px;
+}
+
+.gen2-floor-grey,
+.gen2-floor-lab {
+  background-image: linear-gradient(#bac5c0 1px, transparent 1px), linear-gradient(90deg, #bac5c0 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+.prop-shelf::after,
+.prop-rack::after {
+  left: 5px;
+  top: 5px;
+  width: 5px;
+  height: 5px;
+  background: #d94f4f;
+  box-shadow: 8px 0 0 #43bd89, 16px 0 0 #4da6be, 0 8px 0 #f2cf3f, 8px 8px 0 #c09252;
+}
+
+.prop-table::after,
+.prop-desk::after,
+.prop-trimTable::after {
+  left: 5px;
+  top: 4px;
+  width: 8px;
+  height: 6px;
+  background: #fff2d4;
+  border: 1px solid #11151d;
+  box-shadow: 12px 2px 0 #8ec7d7;
+}
+
+.prop-plant::after {
+  left: 2px;
+  top: -5px;
+  width: 4px;
+  height: 4px;
+  background: #f2cf3f;
+  box-shadow: 5px 0 0 #d94f4f, 2px -3px 0 #fff2d4;
+}
+
+.cargo-coffee {
+  width: 9px;
+  height: 4px;
+  background: #6f7f43;
+  border: 1px solid #11151d;
+  box-shadow: 6px -2px 0 #d8d0be;
 }
 
 .gen2-terminal-title {
@@ -1865,14 +2107,10 @@ select {
 }
 
 .worker-battle-card.is-docked .worker-dialog-box {
-  grid-template-columns: minmax(0, 1fr) 150px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr) 150px;
   gap: 6px;
-  min-height: 94px;
+  min-height: 104px;
   padding: 6px;
-}
-
-.worker-battle-card.is-docked .worker-meter-grid {
-  display: none;
 }
 
 .worker-battle-card.is-docked .worker-battle-menu {
@@ -1882,6 +2120,76 @@ select {
 
 .worker-battle-card.is-docked .worker-battle-menu button {
   font-size: 0.56rem;
+}
+
+
+.worker-scene-note {
+  position: absolute;
+  right: 76px;
+  top: 8px;
+  width: 140px;
+  min-height: 24px;
+}
+
+.worker-sprite-dialog-panel {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  overflow: auto;
+  max-height: 98px;
+  border: 3px solid #11151d;
+  background: #ffffff;
+  padding: 8px;
+}
+
+.worker-sprite-dialog-panel strong {
+  font-size: 0.82rem;
+}
+
+.worker-sprite-dialog-panel span,
+.worker-sprite-dialog-panel em {
+  font-size: 0.64rem;
+  line-height: 1.18;
+  font-style: normal;
+}
+
+.worker-sprite-dialog-panel em {
+  color: #5e6b65;
+}
+
+.worker-sprite-dialog-panel .is-current-route-stop {
+  color: #11151d;
+  background: #f2cf3f;
+  box-shadow: inset 0 -2px 0 #c46b32;
+  padding: 1px 2px;
+}
+
+.gen2-route-path-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 165;
+  pointer-events: none;
+}
+
+.gen2-route-stop {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #11151d;
+  background: #f6eed8;
+  color: #11151d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 7px;
+  line-height: 1;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.3);
+}
+
+.gen2-route-stop.is-current {
+  background: #f2cf3f;
+  animation: markerBounce 0.8s steps(2, end) infinite;
 }
 
 .worker-battle-scene {
@@ -1995,7 +2303,7 @@ select {
 
 .worker-dialog-box {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(210px, 0.9fr) 210px;
+  grid-template-columns: minmax(0, 1.05fr) minmax(260px, 1.15fr) 210px;
   gap: 10px;
   min-height: 116px;
   padding: 10px;

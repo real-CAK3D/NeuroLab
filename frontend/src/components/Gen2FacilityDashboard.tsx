@@ -15,7 +15,23 @@ import {
 } from "../game/gen2FacilityData";
 import { gen2BossHotKeys, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
-import { chatWithOllama, getDockerStats, getFacilityDevices, getHostStats, getOllamaModels, type DockerStats, type FacilityDeviceTelemetry, type FacilityDevices, type HostStats, type OllamaModels } from "../utils/api";
+import {
+  applyFacilityLayoutSnapshot,
+  chatWithOllama,
+  getDockerStats,
+  getFacilityDevices,
+  getFacilityLayoutSnapshot,
+  getHostStats,
+  getOllamaModels,
+  undoFacilityLayoutSnapshot,
+  type DockerStats,
+  type FacilityDeviceTelemetry,
+  type FacilityDevices,
+  type FacilityLayoutSnapshot,
+  type FacilityLayoutRoom,
+  type HostStats,
+  type OllamaModels,
+} from "../utils/api";
 
 type LiveNpc = Gen2Npc & {
   routeIndex: number;
@@ -51,6 +67,19 @@ type VacantDuty = {
   npc: LiveNpc;
 };
 
+type FacilityRoomDraft = {
+  id: string;
+  label: string;
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  notes: string;
+};
+
+type GrowOpsTab = "staff" | "facility";
+
 type Selection =
   | { type: "room"; title: string; lines: string[] }
   | { type: "staff"; title: string; lines: string[] }
@@ -83,6 +112,13 @@ type PokemonDialogState = {
   options: Array<{ label: string; detail: string }>;
 };
 
+type SpriteDialogMirrorState = {
+  title: string;
+  line: string;
+  detail: string;
+  spriteRole: Gen2Npc["role"];
+};
+
 type LiveRoomVital = Gen2RoomVital & {
   online?: boolean;
   memoryPercent?: number | null;
@@ -94,9 +130,10 @@ type RoomVitals = Record<string, LiveRoomVital>;
 const worldWidth = GEN2_W * GEN2_TILE;
 const worldHeight = GEN2_H * GEN2_TILE;
 const MOVEMENT_TICK_MS = 430;
-const NPC_STORAGE_KEY = "gen2-facility-npcs-v3";
+const NPC_STORAGE_KEY = "gen2-facility-npcs-v4";
 const STAFF_STORAGE_KEY = "gen2-grow-ops-staff-v1";
-const DUTY_STORAGE_KEY = "gen2-grow-ops-vacant-duties-v1";
+const DUTY_STORAGE_KEY = "gen2-grow-ops-vacant-duties-v2";
+const FACILITY_DRAFT_STORAGE_KEY = "gen2-grow-ops-facility-drafts-v1";
 const rd2TerminalKeys = ["rd2-61-45", "rd2-65-45", "rd2-69-45", "rd2-73-45", "rd2-77-45"];
 const REQUIRED_STAFF_IDS = new Set(["boss", "screenHr", "cultManager", "opsManager", "salesRep"]);
 const SECURITY_MONITOR_VIEWS = [
@@ -106,7 +143,7 @@ const SECURITY_MONITOR_VIEWS = [
   { title: "GROW ROOM 2", rooms: ["grow2"] },
   { title: "GROW ROOM 3", rooms: ["grow3"] },
   { title: "GROW ROOM 4", rooms: ["grow4"] },
-  { title: "DRY ROOM", rooms: ["soil"] },
+  { title: "VM DRY ROOMS", rooms: ["vmCreations", "soil"] },
   { title: "POTTING", rooms: ["potting"] },
   { title: "PROCESSING", rooms: ["trim"] },
   { title: "PACKAGING", rooms: ["pack"] },
@@ -127,8 +164,11 @@ export function Gen2FacilityDashboard() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | undefined>();
   const [terminalSession, setTerminalSession] = useState<TerminalSession | undefined>();
   const [dialog, setDialog] = useState<PokemonDialogState | undefined>();
+  const [spriteDialogMirror, setSpriteDialogMirror] = useState<SpriteDialogMirrorState | undefined>();
   const [staffBattleId, setStaffBattleId] = useState<string | undefined>();
+  const [highlightRouteId, setHighlightRouteId] = useState<string | undefined>();
   const [growOpsOpen, setGrowOpsOpen] = useState(false);
+  const [growOpsInitialTab, setGrowOpsInitialTab] = useState<GrowOpsTab>("staff");
   const [hostStats, setHostStats] = useState<HostStats | undefined>();
   const [dockerStats, setDockerStats] = useState<DockerStats | undefined>();
   const [ollamaModels, setOllamaModels] = useState<OllamaModels | undefined>();
@@ -299,6 +339,12 @@ export function Gen2FacilityDashboard() {
     });
   }
 
+  function openGrowOps(tab: GrowOpsTab = "staff") {
+    setGrowOpsInitialTab(tab);
+    setGrowOpsOpen(true);
+    setContextMenu(undefined);
+  }
+
   function openHotKeyDialog(hotKey: Gen2HotKey) {
     setContextMenu(undefined);
     setDialog({
@@ -318,14 +364,17 @@ export function Gen2FacilityDashboard() {
     setDialog((current) => {
       if (!current) return current;
       const option = current.options[index] ?? current.options[0];
+      setSpriteDialogMirror({ title: current.title, line: current.message, detail: option.detail, spriteRole: current.spriteRole ?? "secretary" });
       setSelection(actionSelection(current.title, [current.message, `SELECTED: ${option.label}`, option.detail]));
       return undefined;
     });
   }
 
   function openStaffBattle(npc: LiveNpc) {
+    const profile = staff[npc.id] ?? defaultGrowOpsStaff(npc);
     setStaffBattleId(npc.id);
-    setSelection(staffSelection(npc, staff[npc.id]));
+    setSpriteDialogMirror(spriteDialogFor(npc, profile, incidentPhase, incidentTargetRoom));
+    setSelection(staffSelection(npc, profile));
     setContextMenu(undefined);
   }
 
@@ -378,22 +427,23 @@ export function Gen2FacilityDashboard() {
                 <HallView key={`hall-${index}`} hall={hall} />
               ))}
               {gen2Rooms.map((room) => (
-                <RoomView key={room.id} room={room} roomVitals={roomVitals} onOpen={openRoom} onGrowOps={() => setGrowOpsOpen(true)} onSelect={setSelection} onContextMenu={openContextMenu} />
+                <RoomView key={room.id} room={room} roomVitals={roomVitals} onOpen={openRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onContextMenu={openContextMenu} />
               ))}
               {gen2Props.map((prop, index) => (
-                <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} />
+                <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} onFacilityEditor={() => openGrowOps("facility")} />
               ))}
               {npcs.map((npc) => (
                 <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onContextMenu={openContextMenu} />
               ))}
+              <RoutePathOverlay npc={npcs.find((item) => item.id === highlightRouteId)} />
             </div>
           ) : (
-            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => setGrowOpsOpen(true)} onSelect={setSelection} onStaffOpen={openStaffBattle} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} />
+            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
           )}
           {contextMenu ? <ContextMenu menu={contextMenu} onClose={() => setContextMenu(undefined)} /> : null}
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
-          {growOpsOpen ? <GrowOpsPanel npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} /> : null}
+          {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} /> : null}
         </div>
 
         <div className="gen2-info-row">
@@ -401,13 +451,36 @@ export function Gen2FacilityDashboard() {
             <div className="gb-message">
               {focusedRoom ? "RIGHT-CLICK STAFF, PLANTS, COMPUTERS, OR EQUIPMENT FOR QUICK ACTIONS." : "RIGHT-CLICK A ROOM TO ZOOM INTO AN EXPLODED VIEW OR OPEN QUICK ACTIONS."}
             </div>
-            {staffBattleNpc ? <WorkerBattlePanel npc={staffBattleNpc} staff={staff[staffBattleNpc.id]} onClose={() => setStaffBattleId(undefined)} docked /> : null}
+            {staffBattleNpc ? <WorkerBattlePanel npc={staffBattleNpc} staff={staff[staffBattleNpc.id]} mirror={spriteDialogMirror} onRouteView={() => setHighlightRouteId(staffBattleNpc.id)} onClose={() => { setStaffBattleId(undefined); setHighlightRouteId(undefined); }} docked /> : null}
           </div>
           <OperationsDeck onHotKey={openHotKeyDialog} />
           <SelectionCard selection={selection} />
         </div>
       </div>
     </section>
+  );
+}
+
+
+function SpriteDialogMirror({ mirror }: { mirror?: SpriteDialogMirrorState }) {
+  if (!mirror) {
+    return (
+      <div className="sprite-dialog-mirror is-empty">
+        <strong>SPRITE COMMS</strong>
+        <span>CLICK A STAFF SPRITE TO MIRROR ITS CHAT LINE HERE.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="sprite-dialog-mirror">
+      <span className={`gen2-npc role-${mirror.spriteRole} face-down step-0`} aria-hidden="true" />
+      <div>
+        <strong>{mirror.title}</strong>
+        <span>“{mirror.line}”</span>
+        <em>{mirror.detail}</em>
+      </div>
+    </div>
   );
 }
 
@@ -429,6 +502,7 @@ function OperationsDeck({ onHotKey }: { onHotKey: (hotKey: Gen2HotKey) => void }
 }
 
 function GrowOpsPanel({
+  initialTab = "staff",
   npcs,
   staff,
   vacantDuties,
@@ -436,6 +510,7 @@ function GrowOpsPanel({
   onSave,
   onRemove,
 }: {
+  initialTab?: GrowOpsTab;
   npcs: LiveNpc[];
   staff: Record<string, GrowOpsStaff>;
   vacantDuties: VacantDuty[];
@@ -449,6 +524,11 @@ function GrowOpsPanel({
   const [dutyId, setDutyId] = useState("");
   const [draft, setDraft] = useState<GrowOpsStaff>(() => staff[firstStaffId] ?? defaultGrowOpsStaff(npcs[0] ?? gen2Npcs[0]));
   const [savedMessage, setSavedMessage] = useState("CHANGES WAIT FOR SAVE.");
+  const [activeTab, setActiveTab] = useState<GrowOpsTab>(initialTab);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   function loadExisting(id: string) {
     const npc = npcs.find((item) => item.id === id);
@@ -488,10 +568,17 @@ function GrowOpsPanel({
       <div className="grow-ops-title">
         <div>
           <strong>GROW OPS</strong>
-          <span>SPRITE SCREENING AND STAFF COLORS</span>
+          <span>{activeTab === "staff" ? "STAFF / CHARACTER EDITOR" : "FACILITY / ROOM EDITOR"}</span>
         </div>
-        <button type="button" onClick={onClose}>X</button>
+        <div className="grow-ops-title-controls">
+          <button type="button" className="grow-ops-close" onClick={onClose}>CLOSE</button>
+          <div className="grow-ops-title-actions" aria-label="Grow Ops editor tabs">
+            <button type="button" className={activeTab === "staff" ? "is-active" : ""} onClick={() => setActiveTab("staff")}>STAFF</button>
+            <button type="button" className={activeTab === "facility" ? "is-active" : ""} onClick={() => setActiveTab("facility")}>FACILITY</button>
+          </div>
+        </div>
       </div>
+      {activeTab === "staff" ? (
       <div className="grow-ops-body">
         <aside className="grow-ops-roster">
           <button type="button" className="grow-ops-new" onClick={beginHire}>+ NEW SPRITE</button>
@@ -551,6 +638,150 @@ function GrowOpsPanel({
           </div>
         </form>
       </div>
+      ) : (
+        <FacilityEditorPanel />
+      )}
+    </div>
+  );
+}
+
+function FacilityEditorPanel() {
+  const [drafts, setDrafts] = useState<Record<string, FacilityRoomDraft>>(() => loadFacilityRoomDrafts());
+  const [selectedRoomId, setSelectedRoomId] = useState("screen");
+  const [layoutSnapshot, setLayoutSnapshot] = useState<FacilityLayoutSnapshot | null>(null);
+  const [layoutHistoryCount, setLayoutHistoryCount] = useState(0);
+  const [layoutStatus, setLayoutStatus] = useState("Backend snapshots not loaded yet.");
+  const [isApplyingLayout, setIsApplyingLayout] = useState(false);
+  const selectedRoom = gen2Rooms.find((room) => room.id === selectedRoomId) ?? gen2Rooms[0];
+  const roomProps = gen2Props.filter((prop) => prop.room === selectedRoom.id);
+  const draft = drafts[selectedRoom.id] ?? roomToFacilityDraft(selectedRoom);
+
+  useEffect(() => {
+    let active = true;
+    getFacilityLayoutSnapshot()
+      .then((state) => {
+        if (!active) return;
+        setLayoutSnapshot(state.current);
+        setLayoutHistoryCount(state.history.length);
+        if (state.current) setLayoutStatus(`Backend snapshot ${state.current.id} loaded (${state.history.length} undo point${state.history.length === 1 ? "" : "s"}).`);
+        else setLayoutStatus("No backend snapshot yet. Apply will create the first restore point.");
+      })
+      .catch((error) => {
+        if (active) setLayoutStatus(`Backend snapshot load failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => { active = false; };
+  }, []);
+
+  function setDraftField<K extends keyof FacilityRoomDraft>(key: K, value: FacilityRoomDraft[K]) {
+    setDrafts((current) => ({ ...current, [selectedRoom.id]: { ...(current[selectedRoom.id] ?? roomToFacilityDraft(selectedRoom)), [key]: value } }));
+  }
+
+  function saveDraft() {
+    const next = { ...drafts, [selectedRoom.id]: cleanFacilityRoomDraft(draft) };
+    setDrafts(next);
+    persistFacilityRoomDrafts(next);
+    setLayoutStatus(`Local draft saved for ${selectedRoom.label}.`);
+  }
+
+  async function applyDraft() {
+    const next = { ...drafts, [selectedRoom.id]: cleanFacilityRoomDraft(draft) };
+    setDrafts(next);
+    persistFacilityRoomDrafts(next);
+    setIsApplyingLayout(true);
+    setLayoutStatus("Validating and saving backend layout snapshot...");
+    try {
+      const state = await applyFacilityLayoutSnapshot({
+        rooms: buildFacilityLayoutRooms(next),
+        drafts: next,
+        note: next[selectedRoom.id]?.notes || `Facility editor apply: ${selectedRoom.label}`,
+      });
+      setLayoutSnapshot(state.current);
+      setLayoutHistoryCount(state.history.length);
+      const warningCount = state.current?.validation.warnings.length ?? 0;
+      setLayoutStatus(`Applied backend snapshot ${state.current?.id ?? "unknown"}. Undo points: ${state.history.length}. Warnings: ${warningCount}.`);
+    } catch (error) {
+      setLayoutStatus(`Apply failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsApplyingLayout(false);
+    }
+  }
+
+  async function undoSnapshot() {
+    setIsApplyingLayout(true);
+    setLayoutStatus("Restoring previous backend layout snapshot...");
+    try {
+      const state = await undoFacilityLayoutSnapshot();
+      setLayoutSnapshot(state.current);
+      setLayoutHistoryCount(state.history.length);
+      const restoredDrafts = facilityDraftsFromSnapshot(state.current);
+      setDrafts(restoredDrafts);
+      persistFacilityRoomDrafts(restoredDrafts);
+      setLayoutStatus(`Restored ${state.current?.id ?? "previous snapshot"}. Undo points left: ${state.history.length}.`);
+    } catch (error) {
+      setLayoutStatus(`Undo failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsApplyingLayout(false);
+    }
+  }
+
+  function resetDraft() {
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next[selectedRoom.id];
+      persistFacilityRoomDrafts(next);
+      return next;
+    });
+    setLayoutStatus(`Local draft reset for ${selectedRoom.label}. Backend snapshot unchanged.`);
+  }
+
+  return (
+    <div className="grow-ops-facility">
+      <aside className="facility-room-list">
+        {gen2Rooms.map((room) => (
+          <button type="button" key={room.id} className={selectedRoom.id === room.id ? "is-active" : ""} onClick={() => setSelectedRoomId(room.id)}>
+            <b>{(drafts[room.id]?.label ?? room.label)}</b>
+            <em>{room.id} / {room.kind}</em>
+          </button>
+        ))}
+      </aside>
+      <section className="facility-editor-form">
+        <div className="facility-editor-preview">
+          <div className={`facility-mini-room gen2-floor-${floorFor(selectedRoom)}`}>
+            <span>{draft.label}</span>
+            {roomProps.slice(0, 8).map((prop, index) => (
+              <i key={`${prop.kind}-${index}`} className={`facility-mini-prop prop-${prop.kind}`} style={{ left: `${Math.max(4, Math.min(88, ((prop.x - selectedRoom.x) / selectedRoom.w) * 92))}%`, top: `${Math.max(20, Math.min(82, ((prop.y - selectedRoom.y) / selectedRoom.h) * 78 + 12))}%` }} />
+            ))}
+          </div>
+          <div>
+            <strong>ROOM EDITOR</strong>
+            <span>Draft room/facility edits here before applying them to the live map data.</span>
+            <em>Props detected: {roomProps.length}. Doors: {selectedRoom.doors.length}.</em>
+          </div>
+        </div>
+        <div className="grow-ops-grid facility-grid">
+          <label>ROOM<select value={selectedRoom.id} onChange={(event) => setSelectedRoomId(event.target.value)}>{gen2Rooms.map((room) => <option value={room.id} key={room.id}>{room.label}</option>)}</select></label>
+          <label>LABEL<input value={draft.label} onChange={(event) => setDraftField("label", event.target.value)} maxLength={34} /></label>
+          <label>KIND<input value={draft.kind} onChange={(event) => setDraftField("kind", event.target.value)} maxLength={24} /></label>
+          <label>X<input type="number" value={draft.x} onChange={(event) => setDraftField("x", Number(event.target.value))} /></label>
+          <label>Y<input type="number" value={draft.y} onChange={(event) => setDraftField("y", Number(event.target.value))} /></label>
+          <label>WIDTH<input type="number" min={4} value={draft.w} onChange={(event) => setDraftField("w", Number(event.target.value))} /></label>
+          <label>HEIGHT<input type="number" min={4} value={draft.h} onChange={(event) => setDraftField("h", Number(event.target.value))} /></label>
+          <label className="grow-ops-wide">NOTES<input value={draft.notes} onChange={(event) => setDraftField("notes", event.target.value)} maxLength={90} placeholder="ROOM CHANGE NOTES..." /></label>
+        </div>
+        <div className="facility-editor-summary">
+          <span>LIVE MAP: {selectedRoom.w}x{selectedRoom.h} @ X{selectedRoom.x} Y{selectedRoom.y}</span>
+          <span>DRAFT: {draft.w}x{draft.h} @ X{draft.x} Y{draft.y}</span>
+          <span>SNAPSHOT: {layoutSnapshot ? `${layoutSnapshot.id} @ ${new Date(layoutSnapshot.savedAt).toLocaleTimeString()}` : "none yet"}</span>
+          <span>UNDO POINTS: {layoutHistoryCount}</span>
+          <span>{layoutStatus}</span>
+        </div>
+        <div className="grow-ops-actions">
+          <button type="button" onClick={saveDraft} disabled={isApplyingLayout}>SAVE ROOM DRAFT</button>
+          <button type="button" onClick={applyDraft} disabled={isApplyingLayout}>APPLY SNAPSHOT</button>
+          <button type="button" onClick={undoSnapshot} disabled={isApplyingLayout || layoutHistoryCount < 1}>UNDO SNAPSHOT</button>
+          <button type="button" onClick={resetDraft} disabled={isApplyingLayout}>RESET ROOM</button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -566,10 +797,12 @@ function RoomDetail({
   selectedNpcId,
   onBack,
   onGrowOps,
+  onFacilityEditor,
   onSelect,
   onStaffOpen,
   onContextMenu,
   onTerminalOpen,
+  highlightedRouteId,
 }: {
   room: Gen2Room;
   npcs: LiveNpc[];
@@ -581,10 +814,12 @@ function RoomDetail({
   selectedNpcId?: string;
   onBack: () => void;
   onGrowOps: () => void;
+  onFacilityEditor: () => void;
   onSelect: (selection: Selection) => void;
   onStaffOpen: (npc: LiveNpc) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
   onTerminalOpen: (prop: Gen2Prop) => void;
+  highlightedRouteId?: string;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [stageSize, setStageSize] = useState({ width: 920, height: 520 });
@@ -623,11 +858,12 @@ function RoomDetail({
         <div className={`gen2-detail-room gen2-floor-${floorFor(room)} ${roomOfflineClass(room, roomVitals)}`} style={{ left: roomLeft, top: roomTop, width: roomWidth, height: roomHeight, transform: `scale(${scale})` }}>
           <RoomFrame room={room} roomVitals={roomVitals} />
           {roomProps.map((prop, index) => (
-            <PropView key={`${room.id}-${prop.kind}-${index}`} prop={{ ...prop, x: prop.x - room.x, y: prop.y - room.y }} originalProp={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={onSelect} onContextMenu={onContextMenu} onTerminalOpen={onTerminalOpen} detail />
+            <PropView key={`${room.id}-${prop.kind}-${index}`} prop={{ ...prop, x: prop.x - room.x, y: prop.y - room.y }} originalProp={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={onSelect} onContextMenu={onContextMenu} onTerminalOpen={onTerminalOpen} onFacilityEditor={onFacilityEditor} detail />
           ))}
           {roomNpcs.map((npc) => (
             <NpcView key={`${room.id}-${npc.id}`} npc={{ ...npc, x: npc.x - room.x, y: npc.y - room.y }} originalNpc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={selectedNpcId === npc.id} onSelect={onSelect} onStaffOpen={onStaffOpen} onContextMenu={onContextMenu} detail />
           ))}
+          <RoutePathOverlay npc={roomNpcs.find((item) => item.id === highlightedRouteId)} origin={{ x: room.x, y: room.y }} />
         </div>
       </div>
     </div>
@@ -647,6 +883,7 @@ function RoomView({
   roomVitals,
   onOpen,
   onGrowOps,
+  onFacilityEditor,
   onSelect,
   onContextMenu,
 }: {
@@ -654,6 +891,7 @@ function RoomView({
   roomVitals: RoomVitals;
   onOpen: (room: Gen2Room) => void;
   onGrowOps: () => void;
+  onFacilityEditor: () => void;
   onSelect: (selection: Selection) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
 }) {
@@ -712,6 +950,7 @@ function PropView({
   onSelect,
   onContextMenu,
   onTerminalOpen,
+  onFacilityEditor,
   detail = false,
 }: {
   prop: Gen2Prop;
@@ -723,6 +962,7 @@ function PropView({
   onSelect: (selection: Selection) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
   onTerminalOpen: (prop: Gen2Prop) => void;
+  onFacilityEditor?: () => void;
   detail?: boolean;
 }) {
   const w = (prop.w ?? 1) * GEN2_TILE;
@@ -750,6 +990,7 @@ function PropView({
             { label: "Inspect stats", action: () => onSelect(propSelection(source, roomVitals)) },
             ...(source.kind === "terminal" && source.room === "rd2" ? [{ label: "Open model chat", action: () => onTerminalOpen(source) }] : []),
             ...(source.kind === "crate" || source.kind === "shelf" ? [{ label: "Open logs", action: () => onSelect(propSelection(source, roomVitals)) }] : []),
+            ...(source.kind === "desk" && source.room === "screen" && onFacilityEditor ? [{ label: "Room editor", action: onFacilityEditor }] : []),
             { label: "Maintenance", action: () => onSelect(actionSelection("MAINTENANCE", [`TARGET: ${source.kind.toUpperCase()}`, "STATUS: CHECK REQUESTED", "RISK: LOW"])) },
             { label: isPlant(source) ? "Check plant" : "Power cycle", action: () => onSelect(propSelection(source, roomVitals)) },
           ],
@@ -933,13 +1174,31 @@ function PokemonDialog({
   );
 }
 
-function WorkerBattlePanel({ npc, staff, onClose, docked = false }: { npc: LiveNpc; staff?: GrowOpsStaff; onClose: () => void; docked?: boolean }) {
+function WorkerBattlePanel({
+  npc,
+  staff,
+  mirror,
+  onRouteView,
+  onClose,
+  docked = false,
+}: {
+  npc: LiveNpc;
+  staff?: GrowOpsStaff;
+  mirror?: SpriteDialogMirrorState;
+  onRouteView?: () => void;
+  onClose: () => void;
+  docked?: boolean;
+}) {
+  const [panelMode, setPanelMode] = useState<"message" | "route" | "report">("message");
   const profile = staff ?? defaultGrowOpsStaff(npc);
   const displayName = profile.name.toUpperCase();
   const energy = workerMeter(npc, 78);
-  const focus = workerMeter(npc, 63);
-  const workload = npc.pause > 0 ? 34 : workerMeter(npc, 71);
-  const morale = profile.busyMood.includes("OVER") ? 55 : workerMeter(npc, 82);
+  const dialog = mirror && mirror.title === displayName ? mirror : spriteDialogFor(npc, profile, 0, "rd1");
+
+  function showRoute() {
+    setPanelMode("route");
+    onRouteView?.();
+  }
 
   return (
     <div className={`worker-battle-card ${docked ? "is-docked" : ""}`} onClick={(event) => event.stopPropagation()}>
@@ -954,6 +1213,7 @@ function WorkerBattlePanel({ npc, staff, onClose, docked = false }: { npc: LiveN
             <em>{energy}/100</em>
           </div>
         </div>
+        <div className="worker-scene-note" aria-hidden="true" />
         <div className="worker-enemy-sprite">
           <span className={`gen2-npc role-${npc.role} face-down step-${npc.stepFrame}`} style={staffStyle(profile)} />
         </div>
@@ -967,19 +1227,56 @@ function WorkerBattlePanel({ npc, staff, onClose, docked = false }: { npc: LiveN
           <span>WORK ETHIC: {profile.workEthic}</span>
           <span>ROUTE STOP: {npc.routeIndex + 1}/{npc.route.length}</span>
         </div>
-        <div className="worker-meter-grid">
-          <WorkerMeter label="FOCUS" value={focus} />
-          <WorkerMeter label="LOAD" value={workload} />
-          <WorkerMeter label="MORALE" value={morale} />
-          <WorkerMeter label="PACE" value={npc.pause > 0 ? 28 : 72} />
+        <div className="worker-sprite-dialog-panel">
+          {panelMode === "message" ? (
+            <>
+              <strong>SPRITE DIALOG</strong>
+              <span>“{dialog.line}”</span>
+              <em>{dialog.detail}</em>
+            </>
+          ) : panelMode === "route" ? (
+            <>
+              <strong>JOB ROUTE</strong>
+              {npc.route.map((step, index) => (
+                <span key={`${npc.id}-route-${index}`} className={index === npc.routeIndex ? "is-current-route-stop" : ""}>
+                  {index + 1}. X{step.x} Y{step.y}{step.face ? ` FACE ${step.face.toUpperCase()}` : ""}{step.pause ? ` HOLD ${step.pause}` : ""}
+                </span>
+              ))}
+            </>
+          ) : (
+            <>
+              <strong>REPORT LINE</strong>
+              <span>REPORTS TO: {profile.reportTarget}</span>
+              <span>DEPT: {profile.department}</span>
+              <span>TRAIT: {profile.personality}</span>
+              <em>{profile.evaluation}</em>
+            </>
+          )}
         </div>
         <div className="worker-battle-menu">
-          <button type="button">MESSAGE</button>
-          <button type="button">ROUTE</button>
-          <button type="button">REPORT</button>
+          <button type="button" onClick={() => setPanelMode("message")}>MESSAGE</button>
+          <button type="button" onClick={showRoute}>ROUTE</button>
+          <button type="button" onClick={() => setPanelMode("report")}>REPORT</button>
           <button type="button" onClick={onClose}>CLOSE</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RoutePathOverlay({ npc, origin = { x: 0, y: 0 } }: { npc?: LiveNpc; origin?: { x: number; y: number } }) {
+  if (!npc || npc.route.length === 0) return null;
+  return (
+    <div className="gen2-route-path-overlay" aria-hidden="true">
+      {npc.route.map((step, index) => (
+        <span
+          key={`${npc.id}-path-${index}`}
+          className={`gen2-route-stop ${index === npc.routeIndex ? "is-current" : ""}`}
+          style={{ left: (step.x - origin.x) * GEN2_TILE + GEN2_TILE / 2, top: (step.y - origin.y) * GEN2_TILE + GEN2_TILE / 2 }}
+        >
+          {index + 1}
+        </span>
+      ))}
     </div>
   );
 }
@@ -1215,7 +1512,8 @@ function humanizeNpcId(value: string) {
 }
 
 function loadPersistedNpcs(): LiveNpc[] {
-  const initial = gen2Npcs.map((npc) => ({ ...npc, routeIndex: 0, stepFrame: 0 as const, pause: 0 }));
+  const walkable = buildWalkable();
+  const initial = sanitizeNpcs(gen2Npcs.map((npc) => ({ ...npc, routeIndex: 0, stepFrame: 0 as const, pause: 0 })), walkable);
   if (typeof window === "undefined") return initial;
   try {
     const stored = window.localStorage.getItem(NPC_STORAGE_KEY);
@@ -1252,9 +1550,9 @@ function loadPersistedNpcs(): LiveNpc[] {
       });
     hydrated = [...hydrated, ...custom];
     const elapsedTicks = parsed.savedAt ? Math.min(2000, Math.floor((Date.now() - parsed.savedAt) / MOVEMENT_TICK_MS)) : 0;
-    const walkable = buildWalkable();
+    hydrated = sanitizeNpcs(hydrated, walkable);
     for (let index = 0; index < elapsedTicks; index += 1) hydrated = advanceAllNpcs(hydrated, walkable);
-    return hydrated;
+    return sanitizeNpcs(hydrated, walkable);
   } catch {
     return initial;
   }
@@ -1269,11 +1567,30 @@ function isStoredLiveNpc(npc: LiveNpc) {
     && npc.route.length > 0;
 }
 
+
+function sanitizeNpcs(npcs: LiveNpc[], walkable: Set<string>) {
+  return npcs.map((npc) => {
+    const safePosition = nearestWalkableGoal({ x: npc.x, y: npc.y }, walkable, 18) ?? firstWalkableRouteTile(npc, walkable) ?? { x: npc.x, y: npc.y };
+    const route = npc.route.map((step) => nearestWalkableGoal(step, walkable, 6) ? step : { ...step, ...(nearestWalkableGoal(step, walkable, 18) ?? { x: safePosition.x, y: safePosition.y }) });
+    const routeIndex = route.length ? Math.abs(npc.routeIndex) % route.length : 0;
+    return { ...npc, x: safePosition.x, y: safePosition.y, route, routeIndex };
+  });
+}
+
+function firstWalkableRouteTile(npc: LiveNpc, walkable: Set<string>) {
+  for (const step of npc.route) {
+    const safe = nearestWalkableGoal(step, walkable, 18);
+    if (safe) return safe;
+  }
+  return undefined;
+}
+
 function persistNpcs(npcs: LiveNpc[]) {
   if (typeof window === "undefined") return;
   const liveIds = new Set(npcs.map((npc) => npc.id));
   const removedBaseIds = gen2Npcs.filter((npc) => !liveIds.has(npc.id)).map((npc) => npc.id);
-  window.localStorage.setItem(NPC_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), npcs, removedBaseIds }));
+  const walkable = buildWalkable();
+  window.localStorage.setItem(NPC_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), npcs: sanitizeNpcs(npcs, walkable), removedBaseIds }));
 }
 
 function advanceAllNpcs(npcs: LiveNpc[], walkable: Set<string>) {
@@ -1327,11 +1644,14 @@ function randomPause(npc: LiveNpc) {
 }
 
 function nextStep(from: { x: number; y: number }, to: { x: number; y: number }, walkable: Set<string>) {
-  const start = `${from.x},${from.y}`;
+  const startTile = walkable.has(`${from.x},${from.y}`) ? from : nearestWalkableGoal(from, walkable, 18);
+  if (!startTile) return undefined;
+  if (startTile.x !== from.x || startTile.y !== from.y) return startTile;
+  const start = `${startTile.x},${startTile.y}`;
   const goalTile = nearestWalkableGoal(to, walkable);
   if (!goalTile) return undefined;
   const goal = `${goalTile.x},${goalTile.y}`;
-  const queue = [from];
+  const queue = [startTile];
   const cameFrom = new Map<string, string | undefined>([[start, undefined]]);
   const neighbors = [
     { x: 1, y: 0 },
@@ -1371,9 +1691,9 @@ function nextStep(from: { x: number; y: number }, to: { x: number; y: number }, 
   return { x, y };
 }
 
-function nearestWalkableGoal(to: { x: number; y: number }, walkable: Set<string>) {
+function nearestWalkableGoal(to: { x: number; y: number }, walkable: Set<string>, maxDistance = 4) {
   if (walkable.has(`${to.x},${to.y}`)) return to;
-  for (let distance = 1; distance <= 4; distance += 1) {
+  for (let distance = 1; distance <= maxDistance; distance += 1) {
     for (let y = to.y - distance; y <= to.y + distance; y += 1) {
       for (let x = to.x - distance; x <= to.x + distance; x += 1) {
         if (Math.abs(x - to.x) + Math.abs(y - to.y) !== distance) continue;
@@ -1443,6 +1763,65 @@ function fillDoor(set: Set<string>, doorCells: Set<string>, x: number, y: number
   }
 }
 
+function roomToFacilityDraft(room: Gen2Room): FacilityRoomDraft {
+  return { id: room.id, label: room.label, kind: room.kind, x: room.x, y: room.y, w: room.w, h: room.h, notes: "" };
+}
+
+function cleanFacilityRoomDraft(draft: FacilityRoomDraft): FacilityRoomDraft {
+  return {
+    ...draft,
+    label: draft.label.trim() || draft.id.toUpperCase(),
+    kind: draft.kind.trim() || "custom",
+    x: Number.isFinite(draft.x) ? Math.max(0, Math.round(draft.x)) : 0,
+    y: Number.isFinite(draft.y) ? Math.max(0, Math.round(draft.y)) : 0,
+    w: Number.isFinite(draft.w) ? Math.max(4, Math.round(draft.w)) : 4,
+    h: Number.isFinite(draft.h) ? Math.max(4, Math.round(draft.h)) : 4,
+    notes: draft.notes.trim(),
+  };
+}
+
+function buildFacilityLayoutRooms(drafts: Record<string, FacilityRoomDraft>): FacilityLayoutRoom[] {
+  return gen2Rooms.map((room) => {
+    const draft = drafts[room.id] ? cleanFacilityRoomDraft(drafts[room.id]) : roomToFacilityDraft(room);
+    return {
+      id: room.id,
+      label: draft.label,
+      kind: draft.kind,
+      x: draft.x,
+      y: draft.y,
+      w: draft.w,
+      h: draft.h,
+      doors: room.doors,
+    };
+  });
+}
+
+function facilityDraftsFromSnapshot(snapshot: FacilityLayoutSnapshot | null): Record<string, FacilityRoomDraft> {
+  if (!snapshot) return {};
+  const rawDrafts = snapshot.drafts as Record<string, FacilityRoomDraft> | undefined;
+  if (rawDrafts && Object.keys(rawDrafts).length) {
+    return Object.fromEntries(Object.entries(rawDrafts).map(([id, draft]) => [id, cleanFacilityRoomDraft({ ...draft, id })]));
+  }
+  return Object.fromEntries(snapshot.rooms.map((room) => [room.id, cleanFacilityRoomDraft({ ...room, notes: snapshot.note ?? "Restored backend snapshot" })]));
+}
+
+function loadFacilityRoomDrafts(): Record<string, FacilityRoomDraft> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(FACILITY_DRAFT_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, FacilityRoomDraft>;
+    return Object.fromEntries(Object.entries(parsed).map(([id, draft]) => [id, cleanFacilityRoomDraft({ ...roomToFacilityDraft(gen2Rooms.find((room) => room.id === id) ?? gen2Rooms[0]), ...draft, id })]));
+  } catch {
+    return {};
+  }
+}
+
+function persistFacilityRoomDrafts(drafts: Record<string, FacilityRoomDraft>) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(FACILITY_DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+}
+
 function roomSelection(room: Gen2Room, roomVitals: RoomVitals): Selection {
   const operation = gen2RoomOperations[room.id];
   if (!operation) return { type: "room", title: room.label, lines: [`ZONE: ${room.kind.toUpperCase()}`, `SIZE: ${room.w} x ${room.h} TILES`, `DOORS: ${room.doors.length}`, "STATUS: NORMAL"] };
@@ -1481,6 +1860,19 @@ function isBreakRoomTile(x: number, y: number) {
   const room = gen2Rooms.find((item) => item.id === "break");
   if (!room) return false;
   return x >= room.x + 1 && x < room.x + room.w - 1 && y >= room.y + 1 && y < room.y + room.h - 1;
+}
+
+
+function spriteDialogFor(npc: LiveNpc, staff: GrowOpsStaff, incidentPhase: number, incidentTargetRoom: "rd1" | "rd2"): SpriteDialogMirrorState {
+  const incident = incidentBubble(npc, incidentPhase, incidentTargetRoom);
+  const mood = moodText(npc, staff);
+  const line = incident ?? `${staff.currentAction}. Mood: ${mood}.`;
+  return {
+    title: staff.name.toUpperCase(),
+    line,
+    detail: `REPORTS TO: ${staff.reportTarget.toUpperCase()} · ROUTE ${npc.routeIndex + 1}/${Math.max(1, npc.route.length)}`,
+    spriteRole: staff.role,
+  };
 }
 
 function staffSelection(npc: LiveNpc, staff?: GrowOpsStaff): Selection {
@@ -1615,11 +2007,14 @@ function buildLiveRoomVitals(hostStats?: HostStats, dockerStats?: DockerStats, o
     };
   }
   const devices = new Map((facilityDevices?.devices ?? []).map((device) => [device.roomId, device]));
+  vitals.mother = deviceRoomVital(devices.get("mother"), "NUKEBOX");
   vitals.clone = deviceRoomVital(devices.get("clone"), "HP LAPTOP");
   vitals.grow1 = deviceRoomVital(devices.get("grow1"), "BAK3RY");
   vitals.grow2 = deviceRoomVital(devices.get("grow2"), "HACK-SAFE");
   vitals.grow3 = waitingDeviceVital("PI3 / DEVICE PENDING");
-  vitals.grow4 = deviceRoomVital(devices.get("grow4"), "THE GARDEN");
+  vitals.grow4 = waitingDeviceVital("GROW ROOM 4 / DEVICE PENDING");
+  vitals.vmCreations = deviceRoomVital(devices.get("vmCreations"), "CAK3D-CREATIONS");
+  vitals.soil = deviceRoomVital(devices.get("soil"), "THE GARDEN");
   if (dockerStats) {
     vitals.ops = {
       status: dockerStats.available ? (dockerStats.running > 0 ? "BUSY" : "OK") : "WATCH",
@@ -1692,7 +2087,7 @@ function deviceRoomVital(device: FacilityDeviceTelemetry | undefined, deviceName
 function waitingDeviceVital(deviceName: string): LiveRoomVital {
   return {
     status: "WATCH",
-    primary: "PI3 WAITING",
+    primary: deviceName.includes("GROW ROOM 4") ? "GROW4 WAITING" : "PI3 WAITING",
     secondary: "NO DEVICE",
     online: false,
     memoryPercent: null,
@@ -1762,7 +2157,8 @@ function bossMonitorViewFor(prop: Gen2Prop) {
   if (prop.room !== "boss") return undefined;
   const bossViews = [
     { title: "PROCESSING MANAGER", rooms: ["ops", "trim", "pack", "extract"] },
-    { title: "CULTIVATION MANAGER", rooms: ["cultMgr", "clone", "mother", "grow1", "grow2", "grow3", "grow4", "soil", "potting"] },
+    { title: "CULTIVATION MANAGER", rooms: ["cultMgr", "clone", "mother", "grow1", "grow2", "grow3", "grow4", "potting"] },
+    { title: "VM ROOMS", rooms: ["vmCreations", "soil", "rd2"] },
     { title: "SALES MONITOR", rooms: ["sales"] },
     { title: "R&D MONITOR", rooms: ["rd1", "rd2"] },
     { title: "WAREHOUSE MONITOR", rooms: ["dock", "warehouse"] },
@@ -1832,10 +2228,13 @@ function incidentBubble(npc: LiveNpc, incidentPhase: number, incidentTargetRoom:
 }
 
 function visibleCargo(npc: LiveNpc, incidentPhase: number): Gen2Npc["cargo"] | undefined {
-  if (npc.id === "researcher") return incidentPhase === 14 ? "extinguisher" : undefined;
+  if (npc.id === "researcher") {
+    if (incidentPhase === 14) return "extinguisher";
+    return [1, 2].includes(npc.routeIndex) ? "extract" : undefined;
+  }
   if (npc.id === "rdSafety") return undefined;
   if (npc.id === "extractor") {
-    if (npc.routeIndex === 2) return "package";
+    if (npc.routeIndex === 1) return "package";
     if (npc.routeIndex === 3) return "extract";
     return undefined;
   }
@@ -1850,6 +2249,8 @@ function visibleCargo(npc: LiveNpc, incidentPhase: number): Gen2Npc["cargo"] | u
     soilWorker: [2, 3, 4],
     processor: [1],
     packer: [1],
+    opsManager: [1, 2],
+    cultManager: [2],
     logistics: [2],
     salesRep: [4],
   };
@@ -1870,7 +2271,7 @@ function roomOfflineClass(room: Gen2Room, roomVitals: RoomVitals) {
 function floorFor(room: Gen2Room) {
   if (room.kind === "boss") return "wood";
   if (room.kind === "break" || room.kind === "bathroom") return "blue";
-  if (room.kind === "security" || room.kind === "warehouse" || room.kind === "extraction") return "grey";
+  if (room.kind === "security" || room.kind === "warehouse" || room.kind === "extraction" || room.kind === "vm") return "grey";
   return "lab";
 }
 
