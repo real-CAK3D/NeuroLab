@@ -219,7 +219,8 @@ export function Gen2FacilityDashboard() {
   const focusedRoom = focusedRoomId ? gen2Rooms.find((room) => room.id === focusedRoomId) : undefined;
   const staffBattleNpc = staffBattleId ? npcs.find((npc) => npc.id === staffBattleId) : undefined;
   const roomVitals = useMemo(() => buildLiveRoomVitals(hostStats, dockerStats, ollamaModels, facilityDevices), [hostStats, dockerStats, ollamaModels, facilityDevices]);
-  const activityState = useMemo(() => buildActivityState(productionPhase, incidentPhase, npcs), [productionPhase, incidentPhase, npcs]);
+  const [activityState, setActivityState] = useState<ActivityState>(() => loadPersistedActivityState(npcs));
+  const previousNpcRoomsRef = useRef<Record<string, string | undefined>>(roomMapForNpcs(npcs));
 
   useLayoutEffect(() => {
     function fitBoard() {
@@ -270,6 +271,26 @@ export function Gen2FacilityDashboard() {
   useEffect(() => {
     persistVacantDuties(vacantDuties);
   }, [vacantDuties]);
+
+  useEffect(() => {
+    const previousRooms = previousNpcRoomsRef.current;
+    const nextRooms = roomMapForNpcs(npcs);
+    const arrivals = npcs
+      .map((npc) => ({ npc, fromRoomId: previousRooms[npc.id], toRoomId: nextRooms[npc.id] }))
+      .filter((arrival) => arrival.toRoomId && arrival.toRoomId !== arrival.fromRoomId);
+    previousNpcRoomsRef.current = nextRooms;
+    if (arrivals.length) {
+      setActivityState((current) => advanceActivityState(current, arrivals, productionPhase, incidentPhase));
+    }
+  }, [npcs, productionPhase, incidentPhase]);
+
+  useEffect(() => {
+    setActivityState((current) => current.phaseLabel === activityPhaseLabel(productionPhase) ? current : { ...current, phaseLabel: activityPhaseLabel(productionPhase) });
+  }, [productionPhase]);
+
+  useEffect(() => {
+    persistActivityState(activityState);
+  }, [activityState]);
 
   useEffect(() => {
     let alive = true;
@@ -368,6 +389,7 @@ export function Gen2FacilityDashboard() {
     try {
       const state = await undoActivityStateSnapshot();
       setActivityHistoryCount(state.history.length);
+      if (state.current?.state) setActivityState(coerceActivityState(state.current.state, activityState));
       setActivitySnapshotStatus(`Restored ${state.current?.id ?? "activity checkpoint"}. Undo points left: ${state.history.length}.`);
     } catch (error) {
       setActivitySnapshotStatus(`Activity undo failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -565,34 +587,142 @@ function SpriteDialogMirror({ mirror }: { mirror?: SpriteDialogMirrorState }) {
   );
 }
 
-function buildActivityState(productionPhase: number, incidentPhase: number, npcs: LiveNpc[]): ActivityState {
-  const tick = productionPhase + incidentPhase * 6;
+const ACTIVITY_STORAGE_KEY = "neurolab_gen2_activity_state_v1";
+
+function defaultActivityState(npcs: LiveNpc[]): ActivityState {
   const roomCounts = countNpcsByRoom(npcs);
   const packagingWorkers = roomCounts.pack ?? 0;
   const extractionWorkers = roomCounts.extract ?? 0;
   const rdWorkers = (roomCounts.rd1 ?? 0) + (roomCounts.rd2 ?? 0);
-  const salesWorkers = roomCounts.sales ?? 0;
-  const packageCargo = npcs.filter((npc) => npc.cargo === "package").length;
-  const extractCargo = npcs.filter((npc) => npc.cargo === "extract").length;
-  const testPulse = incidentPhase % 5;
-  const inventory: ActivityInventory = {
-    packaging: 8 + productionPhase * 2 + packagingWorkers + packageCargo,
-    extractionBatches: 2 + Math.floor((productionPhase + extractionWorkers + packageCargo) / 2),
-    rdSamples: 1 + rdWorkers + extractCargo + (incidentPhase % 3),
-    rdPassed: Math.max(0, Math.floor((tick + rdWorkers) / 5) % 9),
-    rdFailed: testPulse === 0 ? 1 : 0,
-    salesStock: 4 + salesWorkers + Math.floor((tick + 2) / 4) % 12,
-    managerRequests: testPulse === 0 ? 2 : incidentPhase % 2,
+  return {
+    tick: 0,
+    phaseLabel: "PACKAGING QUEUE",
+    inventory: {
+      packaging: 8 + packagingWorkers,
+      extractionBatches: 2 + extractionWorkers,
+      rdSamples: 1 + rdWorkers,
+      rdPassed: 0,
+      rdFailed: 0,
+      salesStock: 4,
+      managerRequests: 0,
+    },
+    feed: [
+      { id: "activity-boot", tick: 0, roomId: "ops", kind: "manager", message: "Activity loop online; waiting for staff route arrivals." },
+      { id: "activity-seed-pack", tick: 0, roomId: "pack", kind: "packaging", message: "Packaging seeded starter inventory for extraction handoff." },
+    ],
   };
-  const phaseLabel = ["PACKAGING QUEUE", "EXTRACTION RUN", "R&D SAMPLE", "TEST REVIEW", "SALES READY", "MANAGER SWEEP"][productionPhase] ?? "LIVE LOOP";
-  const feed: ActivityEvent[] = [
-    { id: `pkg-${tick}`, tick, roomId: "pack", kind: "packaging", message: `Packaging staged ${inventory.packaging} units for extraction.` },
-    { id: `ext-${tick}`, tick, roomId: "extract", kind: "extraction", message: `Extraction running ${inventory.extractionBatches} active batch${inventory.extractionBatches === 1 ? "" : "es"}.` },
-    { id: `rd-${tick}`, tick, roomId: "rd1", kind: "research", message: `R&D holding ${inventory.rdSamples} sample${inventory.rdSamples === 1 ? "" : "s"} for test.` },
-    { id: `test-${tick}`, tick, roomId: "rd2", kind: "test", message: inventory.rdFailed ? "R&D Test flagged a failed sample; manager request queued." : `${inventory.rdPassed} test pass tickets ready for Sales.` },
-    { id: `sales-${tick}`, tick, roomId: "sales", kind: "sales", message: `Sales stock reads ${inventory.salesStock}; manager requests ${inventory.managerRequests}.` },
-  ];
-  return { tick, phaseLabel, inventory, feed };
+}
+
+function loadPersistedActivityState(npcs: LiveNpc[]) {
+  const fallback = defaultActivityState(npcs);
+  if (typeof window === "undefined") return fallback;
+  try {
+    const stored = window.localStorage.getItem(ACTIVITY_STORAGE_KEY);
+    if (!stored) return fallback;
+    return coerceActivityState(JSON.parse(stored), fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function persistActivityState(state: ActivityState) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(state));
+}
+
+function coerceActivityState(value: unknown, fallback: ActivityState): ActivityState {
+  const state = value as Partial<ActivityState> | undefined;
+  const inventory = state?.inventory as Partial<ActivityInventory> | undefined;
+  const safeInventory: ActivityInventory = {
+    packaging: finiteInventory(inventory?.packaging, fallback.inventory.packaging),
+    extractionBatches: finiteInventory(inventory?.extractionBatches, fallback.inventory.extractionBatches),
+    rdSamples: finiteInventory(inventory?.rdSamples, fallback.inventory.rdSamples),
+    rdPassed: finiteInventory(inventory?.rdPassed, fallback.inventory.rdPassed),
+    rdFailed: finiteInventory(inventory?.rdFailed, fallback.inventory.rdFailed),
+    salesStock: finiteInventory(inventory?.salesStock, fallback.inventory.salesStock),
+    managerRequests: finiteInventory(inventory?.managerRequests, fallback.inventory.managerRequests),
+  };
+  const feed = Array.isArray(state?.feed) ? state.feed.filter(isActivityEvent).slice(0, 30) : fallback.feed;
+  return {
+    tick: Number.isFinite(state?.tick) ? Number(state?.tick) : fallback.tick,
+    phaseLabel: typeof state?.phaseLabel === "string" ? state.phaseLabel : fallback.phaseLabel,
+    inventory: safeInventory,
+    feed,
+  };
+}
+
+function finiteInventory(value: unknown, fallback: number) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(Number(value))) : fallback;
+}
+
+function isActivityEvent(event: unknown): event is ActivityEvent {
+  const item = event as ActivityEvent;
+  return typeof item?.id === "string" && Number.isFinite(item.tick) && typeof item.roomId === "string" && typeof item.message === "string";
+}
+
+function advanceActivityState(current: ActivityState, arrivals: Array<{ npc: LiveNpc; fromRoomId?: string; toRoomId?: string }>, productionPhase: number, incidentPhase: number): ActivityState {
+  let next: ActivityState = { ...current, tick: current.tick + 1, phaseLabel: activityPhaseLabel(productionPhase), inventory: { ...current.inventory }, feed: [...current.feed] };
+  for (const arrival of arrivals) {
+    const event = activityEventForArrival(arrival.npc, arrival.fromRoomId, arrival.toRoomId, next.tick, incidentPhase);
+    if (!event) continue;
+    next = applyActivityEvent(next, event);
+  }
+  return { ...next, feed: next.feed.slice(0, 30) };
+}
+
+function applyActivityEvent(state: ActivityState, event: ActivityEvent): ActivityState {
+  const inventory = { ...state.inventory };
+  if (event.kind === "packaging") inventory.packaging += 2;
+  if (event.kind === "extraction") {
+    inventory.packaging = Math.max(0, inventory.packaging - 1);
+    inventory.extractionBatches += 1;
+  }
+  if (event.kind === "research") {
+    inventory.extractionBatches = Math.max(0, inventory.extractionBatches - 1);
+    inventory.rdSamples += 1;
+  }
+  if (event.kind === "test") {
+    inventory.rdSamples = Math.max(0, inventory.rdSamples - 1);
+    if (event.message.includes("FAILED")) {
+      inventory.rdFailed += 1;
+      inventory.managerRequests += 1;
+    } else {
+      inventory.rdPassed += 1;
+    }
+  }
+  if (event.kind === "sales") {
+    inventory.rdPassed = Math.max(0, inventory.rdPassed - 1);
+    inventory.salesStock += 1;
+  }
+  if (event.kind === "manager") inventory.managerRequests = Math.max(0, inventory.managerRequests - 1);
+  return { ...state, inventory, feed: [event, ...state.feed] };
+}
+
+function activityEventForArrival(npc: LiveNpc, fromRoomId: string | undefined, toRoomId: string | undefined, tick: number, incidentPhase: number): ActivityEvent | undefined {
+  if (!toRoomId || toRoomId === fromRoomId) return undefined;
+  const name = gen2WorkerIdentity[npc.id]?.name ?? npc.id.replace(/([A-Z])/g, " $1");
+  const cargo = visibleCargo(npc, incidentPhase);
+  if (toRoomId === "pack") return { id: `pkg-${tick}-${npc.id}`, tick, roomId: toRoomId, kind: "packaging", message: `${name} staged ${cargo === "package" ? "sealed" : "fresh"} packages for extraction.` };
+  if (toRoomId === "extract") return { id: `ext-${tick}-${npc.id}`, tick, roomId: toRoomId, kind: "extraction", message: `${name} delivered package feedstock; extraction batch started.` };
+  if (toRoomId === "rd1") return { id: `rd-${tick}-${npc.id}`, tick, roomId: toRoomId, kind: "research", message: `${name} moved extract into R&D sample intake.` };
+  if (toRoomId === "rd2") {
+    const failed = incidentPhase % 7 === 0;
+    return { id: `test-${tick}-${npc.id}`, tick, roomId: toRoomId, kind: "test", message: failed ? `${name} R&D TEST FAILED; manager request queued.` : `${name} cleared R&D TEST; pass ticket released.` };
+  }
+  if (toRoomId === "sales") return { id: `sales-${tick}-${npc.id}`, tick, roomId: toRoomId, kind: "sales", message: `${name} pushed passed inventory into Sales stock.` };
+  if (["ops", "cultMgr", "boss"].includes(toRoomId)) return { id: `mgr-${tick}-${npc.id}`, tick, roomId: toRoomId, kind: "manager", message: `${name} checked the manager queue after ${fromRoomId ? roomLabel(fromRoomId) : "floor"}.` };
+  return undefined;
+}
+
+function activityPhaseLabel(productionPhase: number) {
+  return ["PACKAGING QUEUE", "EXTRACTION RUN", "R&D SAMPLE", "TEST REVIEW", "SALES READY", "MANAGER SWEEP"][productionPhase] ?? "LIVE LOOP";
+}
+
+function roomMapForNpcs(npcs: LiveNpc[]) {
+  return npcs.reduce<Record<string, string | undefined>>((rooms, npc) => {
+    rooms[npc.id] = roomAt(npc.x, npc.y)?.id;
+    return rooms;
+  }, {});
 }
 
 function countNpcsByRoom(npcs: LiveNpc[]) {
@@ -634,8 +764,9 @@ function OperationsDeck({
       <div className="activity-engine-card">
         <div className="activity-engine-title">
           <strong>ACTIVITY ENGINE</strong>
-          <span>{activityState.phaseLabel}</span>
+          <span>{activityState.phaseLabel} · TICK {activityState.tick}</span>
         </div>
+        <em className="activity-engine-subtitle">Route arrivals now mutate inventory and feed entries.</em>
         <div className="activity-inventory-grid">
           <span><b>{inv.packaging}</b> PKG</span>
           <span><b>{inv.extractionBatches}</b> EXT</span>

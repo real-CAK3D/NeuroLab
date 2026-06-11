@@ -326,9 +326,16 @@ select {
   align-items: center;
 }
 
-.activity-engine-title span {
+.activity-engine-title span,
+.activity-engine-subtitle {
   color: #5e6b65;
   font-size: 0.54rem;
+}
+
+.activity-engine-subtitle {
+  font-style: normal;
+  text-transform: none;
+  line-height: 1.25;
 }
 
 .activity-inventory-grid {
