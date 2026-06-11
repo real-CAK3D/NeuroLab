@@ -649,8 +649,10 @@ function FacilityEditorPanel() {
   const [drafts, setDrafts] = useState<Record<string, FacilityRoomDraft>>(() => loadFacilityRoomDrafts());
   const [selectedRoomId, setSelectedRoomId] = useState("screen");
   const [layoutSnapshot, setLayoutSnapshot] = useState<FacilityLayoutSnapshot | null>(null);
+  const [layoutHistory, setLayoutHistory] = useState<FacilityLayoutSnapshot[]>([]);
   const [layoutHistoryCount, setLayoutHistoryCount] = useState(0);
   const [layoutStatus, setLayoutStatus] = useState("Backend snapshots not loaded yet.");
+  const [layoutImportText, setLayoutImportText] = useState("");
   const [isApplyingLayout, setIsApplyingLayout] = useState(false);
   const selectedRoom = gen2Rooms.find((room) => room.id === selectedRoomId) ?? gen2Rooms[0];
   const roomProps = gen2Props.filter((prop) => prop.room === selectedRoom.id);
@@ -662,6 +664,7 @@ function FacilityEditorPanel() {
       .then((state) => {
         if (!active) return;
         setLayoutSnapshot(state.current);
+        setLayoutHistory(state.history);
         setLayoutHistoryCount(state.history.length);
         if (state.current) setLayoutStatus(`Backend snapshot ${state.current.id} loaded (${state.history.length} undo point${state.history.length === 1 ? "" : "s"}).`);
         else setLayoutStatus("No backend snapshot yet. Apply will create the first restore point.");
@@ -696,6 +699,7 @@ function FacilityEditorPanel() {
         note: next[selectedRoom.id]?.notes || `Facility editor apply: ${selectedRoom.label}`,
       });
       setLayoutSnapshot(state.current);
+      setLayoutHistory(state.history);
       setLayoutHistoryCount(state.history.length);
       const warningCount = state.current?.validation.warnings.length ?? 0;
       setLayoutStatus(`Applied backend snapshot ${state.current?.id ?? "unknown"}. Undo points: ${state.history.length}. Warnings: ${warningCount}.`);
@@ -712,6 +716,7 @@ function FacilityEditorPanel() {
     try {
       const state = await undoFacilityLayoutSnapshot();
       setLayoutSnapshot(state.current);
+      setLayoutHistory(state.history);
       setLayoutHistoryCount(state.history.length);
       const restoredDrafts = facilityDraftsFromSnapshot(state.current);
       setDrafts(restoredDrafts);
@@ -722,6 +727,49 @@ function FacilityEditorPanel() {
     } finally {
       setIsApplyingLayout(false);
     }
+  }
+
+  function exportLayout() {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      source: "NeuroLab Facility Editor",
+      current: layoutSnapshot,
+      draftRooms: buildFacilityLayoutRooms(drafts),
+      drafts,
+    };
+    const content = JSON.stringify(payload, null, 2);
+    if (typeof window !== "undefined" && typeof Blob !== "undefined") {
+      const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `neurolab-facility-layout-${Date.now()}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
+    setLayoutImportText(content);
+    setLayoutStatus("Exported layout JSON and copied it into the import/export buffer.");
+  }
+
+  function importLayoutDraft() {
+    try {
+      const parsed = JSON.parse(layoutImportText) as Record<string, unknown>;
+      const importedDrafts = facilityDraftsFromImport(parsed);
+      if (!Object.keys(importedDrafts).length) throw new Error("No rooms or drafts found in JSON.");
+      setDrafts(importedDrafts);
+      persistFacilityRoomDrafts(importedDrafts);
+      const firstImportedId = Object.keys(importedDrafts)[0];
+      if (firstImportedId) setSelectedRoomId(firstImportedId);
+      setLayoutStatus(`Imported ${Object.keys(importedDrafts).length} room drafts. Review, then APPLY SNAPSHOT to persist backend state.`);
+    } catch (error) {
+      setLayoutStatus(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  function loadSnapshotIntoDrafts(snapshot: FacilityLayoutSnapshot) {
+    const restoredDrafts = facilityDraftsFromSnapshot(snapshot);
+    setDrafts(restoredDrafts);
+    persistFacilityRoomDrafts(restoredDrafts);
+    setLayoutStatus(`Loaded ${snapshot.id} into local drafts. Use APPLY SNAPSHOT if you want it current again.`);
   }
 
   function resetDraft() {
@@ -775,10 +823,29 @@ function FacilityEditorPanel() {
           <span>UNDO POINTS: {layoutHistoryCount}</span>
           <span>{layoutStatus}</span>
         </div>
-        <div className="grow-ops-actions">
+        <div className="facility-validation-panel">
+          <strong>VALIDATION</strong>
+          {layoutSnapshot?.validation.failures.length ? layoutSnapshot.validation.failures.slice(0, 4).map((failure) => <span className="facility-validation-fail" key={failure}>FAIL: {failure}</span>) : <span className="facility-validation-pass">No backend validation failures on current snapshot.</span>}
+          {layoutSnapshot?.validation.warnings.slice(0, 5).map((warning) => <span key={warning}>WARN: {warning}</span>)}
+        </div>
+        <div className="facility-history-panel">
+          <strong>SNAPSHOT HISTORY</strong>
+          {layoutHistory.length ? layoutHistory.slice(0, 4).map((snapshot) => (
+            <button type="button" key={snapshot.id} onClick={() => loadSnapshotIntoDrafts(snapshot)}>
+              <b>{snapshot.id}</b>
+              <span>{snapshot.note || "Facility snapshot"}</span>
+            </button>
+          )) : <span>No restore points yet. Apply twice to create undo history.</span>}
+        </div>
+        <div className="facility-import-export">
+          <label>IMPORT / EXPORT JSON<textarea value={layoutImportText} onChange={(event) => setLayoutImportText(event.target.value)} placeholder="Paste a NeuroLab facility layout export here, or click EXPORT JSON to fill this buffer." /></label>
+        </div>
+        <div className="grow-ops-actions facility-actions">
           <button type="button" onClick={saveDraft} disabled={isApplyingLayout}>SAVE ROOM DRAFT</button>
           <button type="button" onClick={applyDraft} disabled={isApplyingLayout}>APPLY SNAPSHOT</button>
           <button type="button" onClick={undoSnapshot} disabled={isApplyingLayout || layoutHistoryCount < 1}>UNDO SNAPSHOT</button>
+          <button type="button" onClick={exportLayout} disabled={isApplyingLayout}>EXPORT JSON</button>
+          <button type="button" onClick={importLayoutDraft} disabled={isApplyingLayout || !layoutImportText.trim()}>IMPORT DRAFT</button>
           <button type="button" onClick={resetDraft} disabled={isApplyingLayout}>RESET ROOM</button>
         </div>
       </section>
@@ -1803,6 +1870,15 @@ function facilityDraftsFromSnapshot(snapshot: FacilityLayoutSnapshot | null): Re
     return Object.fromEntries(Object.entries(rawDrafts).map(([id, draft]) => [id, cleanFacilityRoomDraft({ ...draft, id })]));
   }
   return Object.fromEntries(snapshot.rooms.map((room) => [room.id, cleanFacilityRoomDraft({ ...room, notes: snapshot.note ?? "Restored backend snapshot" })]));
+}
+
+function facilityDraftsFromImport(input: Record<string, unknown>): Record<string, FacilityRoomDraft> {
+  if (input.current && typeof input.current === "object") return facilityDraftsFromSnapshot(input.current as FacilityLayoutSnapshot);
+  if (input.drafts && typeof input.drafts === "object") {
+    return Object.fromEntries(Object.entries(input.drafts as Record<string, FacilityRoomDraft>).map(([id, draft]) => [id, cleanFacilityRoomDraft({ ...draft, id })]));
+  }
+  const rooms = Array.isArray(input.draftRooms) ? input.draftRooms : Array.isArray(input.rooms) ? input.rooms : [];
+  return Object.fromEntries((rooms as FacilityLayoutRoom[]).filter((room) => room?.id).map((room) => [room.id, cleanFacilityRoomDraft({ ...room, notes: "Imported layout draft" })]));
 }
 
 function loadFacilityRoomDrafts(): Record<string, FacilityRoomDraft> {

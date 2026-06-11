@@ -1813,10 +1813,66 @@ select {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.facility-editor-summary {
+.facility-editor-summary,
+.facility-validation-panel,
+.facility-history-panel,
+.facility-import-export {
   border: 3px solid #11151d;
   background: #e8f0df;
   padding: 8px;
+}
+
+.facility-validation-panel,
+.facility-history-panel,
+.facility-import-export {
+  display: grid;
+  gap: 5px;
+  font-size: 0.58rem;
+  color: #5e6b65;
+}
+
+.facility-validation-panel strong,
+.facility-history-panel strong {
+  color: #11151d;
+  font-size: 0.7rem;
+}
+
+.facility-validation-pass {
+  color: #2a8f55;
+}
+
+.facility-validation-fail {
+  color: #b8322a;
+}
+
+.facility-history-panel button {
+  display: grid;
+  gap: 2px;
+  border: 2px solid #11151d;
+  background: #f6eed8;
+  color: #11151d;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.facility-history-panel button span {
+  color: #5e6b65;
+  font-size: 0.55rem;
+}
+
+.facility-import-export textarea {
+  min-height: 72px;
+  resize: vertical;
+  border: 2px solid #11151d;
+  background: #fff2d4;
+  color: #11151d;
+  font-family: inherit;
+  font-size: 0.56rem;
+  padding: 6px;
+}
+
+.facility-actions {
+  flex-wrap: wrap;
 }
 
 
