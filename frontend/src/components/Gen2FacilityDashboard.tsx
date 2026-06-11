@@ -54,7 +54,7 @@ type ActivityEvent = {
   id: string;
   tick: number;
   roomId: string;
-  kind: "packaging" | "extraction" | "research" | "test" | "sales" | "manager";
+  kind: "packaging" | "extraction" | "research" | "test" | "sales" | "manager" | "control";
   message: string;
 };
 
@@ -64,6 +64,8 @@ type ActivityState = {
   inventory: ActivityInventory;
   feed: ActivityEvent[];
 };
+
+type ActivityControl = "seed-packaging" | "force-extraction" | "force-rd-pass" | "force-rd-fail" | "clear-manager-requests";
 
 type LiveNpc = Gen2Npc & {
   routeIndex: number;
@@ -209,6 +211,8 @@ export function Gen2FacilityDashboard() {
   const [activitySnapshotStatus, setActivitySnapshotStatus] = useState("Activity snapshots not loaded yet.");
   const [activityHistoryCount, setActivityHistoryCount] = useState(0);
   const [isSavingActivity, setIsSavingActivity] = useState(false);
+  const [activityLabOpen, setActivityLabOpen] = useState(false);
+  const [intercomNotice, setIntercomNotice] = useState("INTERCOM STANDBY — route arrivals and manual lab controls will appear here.");
   const [productionPhase, setProductionPhase] = useState(0);
   const [incidentPhase, setIncidentPhase] = useState(0);
   const [incidentTargetRoom, setIncidentTargetRoom] = useState<"rd1" | "rd2">("rd1");
@@ -383,6 +387,13 @@ export function Gen2FacilityDashboard() {
     }
   }
 
+  function runActivityControl(control: ActivityControl) {
+    const result = applyManualActivityControl(activityState, control);
+    setActivityState(result.state);
+    setIntercomNotice(result.event.message);
+    setActivitySnapshotStatus(`Manual Activity Lab control queued: ${result.event.message}`);
+  }
+
   async function undoActivityCheckpoint() {
     setIsSavingActivity(true);
     setActivitySnapshotStatus("Restoring previous activity checkpoint...");
@@ -546,6 +557,7 @@ export function Gen2FacilityDashboard() {
           {contextMenu ? <ContextMenu menu={contextMenu} onClose={() => setContextMenu(undefined)} /> : null}
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
+          {activityLabOpen ? <ActivityLabDrawer activityState={activityState} intercomNotice={intercomNotice} onRunControl={runActivityControl} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} onClose={() => setActivityLabOpen(false)} isSavingActivity={isSavingActivity} activityHistoryCount={activityHistoryCount} /> : null}
           {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} focusStaffId={growOpsFocusStaffId} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} onRestoreStaff={(nextStaff) => setStaff(Object.fromEntries(Object.entries(nextStaff).map(([id, item]) => [id, cleanGrowOpsStaff({ ...(item as GrowOpsStaff), id })])))} onPreviewRoute={(id) => { setHighlightRouteId(id); setStaffBattleId(id); }} onClearRoutePreview={() => setHighlightRouteId(undefined)} /> : null}
         </div>
 
@@ -554,9 +566,10 @@ export function Gen2FacilityDashboard() {
             <div className="gb-message">
               {focusedRoom ? "RIGHT-CLICK STAFF, PLANTS, COMPUTERS, OR EQUIPMENT FOR QUICK ACTIONS." : "RIGHT-CLICK A ROOM TO ZOOM INTO AN EXPLODED VIEW OR OPEN QUICK ACTIONS."}
             </div>
+            <div className="gb-message activity-intercom">{intercomNotice}</div>
             {staffBattleNpc ? <WorkerBattlePanel npc={staffBattleNpc} staff={staff[staffBattleNpc.id]} mirror={spriteDialogMirror} onRouteView={() => setHighlightRouteId(staffBattleNpc.id)} onClose={() => { setStaffBattleId(undefined); setHighlightRouteId(undefined); }} docked /> : null}
           </div>
-          <OperationsDeck activityState={activityState} activityStatus={activitySnapshotStatus} activityHistoryCount={activityHistoryCount} isSavingActivity={isSavingActivity} onHotKey={openHotKeyDialog} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} />
+          <OperationsDeck activityState={activityState} activityStatus={activitySnapshotStatus} activityHistoryCount={activityHistoryCount} isSavingActivity={isSavingActivity} onHotKey={openHotKeyDialog} onOpenActivityLab={() => setActivityLabOpen(true)} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} />
           <SelectionCard selection={selection} />
         </div>
       </div>
@@ -698,6 +711,42 @@ function applyActivityEvent(state: ActivityState, event: ActivityEvent): Activit
   return { ...state, inventory, feed: [event, ...state.feed] };
 }
 
+function applyManualActivityControl(current: ActivityState, control: ActivityControl): { state: ActivityState; event: ActivityEvent } {
+  const inventory = { ...current.inventory };
+  const tick = current.tick + 1;
+  let message = "Manual Activity Lab pulse queued.";
+  if (control === "seed-packaging") {
+    inventory.packaging += 5;
+    message = "INTERCOM: Packaging seeded +5 units for extraction crews.";
+  }
+  if (control === "force-extraction") {
+    inventory.packaging = Math.max(0, inventory.packaging - 1);
+    inventory.extractionBatches += 1;
+    message = "INTERCOM: Extraction batch forced from available packaging stock.";
+  }
+  if (control === "force-rd-pass") {
+    inventory.rdSamples = Math.max(0, inventory.rdSamples - 1);
+    inventory.rdPassed += 1;
+    message = "INTERCOM: R&D test manually passed; pass ticket released.";
+  }
+  if (control === "force-rd-fail") {
+    inventory.rdSamples = Math.max(0, inventory.rdSamples - 1);
+    inventory.rdFailed += 1;
+    inventory.managerRequests += 1;
+    message = "INTERCOM: R&D test manually failed; manager request queued.";
+  }
+  if (control === "clear-manager-requests") {
+    const cleared = inventory.managerRequests;
+    inventory.managerRequests = 0;
+    message = `INTERCOM: Manager queue cleared (${cleared} request${cleared === 1 ? "" : "s"}).`;
+  }
+  const event: ActivityEvent = { id: `manual-${tick}-${control}`, tick, roomId: "ops", kind: "control", message };
+  return {
+    event,
+    state: { ...current, tick, phaseLabel: "MANUAL LAB CONTROL", inventory, feed: [event, ...current.feed].slice(0, 30) },
+  };
+}
+
 function activityEventForArrival(npc: LiveNpc, fromRoomId: string | undefined, toRoomId: string | undefined, tick: number, incidentPhase: number): ActivityEvent | undefined {
   if (!toRoomId || toRoomId === fromRoomId) return undefined;
   const name = gen2WorkerIdentity[npc.id]?.name ?? npc.id.replace(/([A-Z])/g, " $1");
@@ -739,6 +788,7 @@ function OperationsDeck({
   activityHistoryCount,
   isSavingActivity,
   onHotKey,
+  onOpenActivityLab,
   onSaveActivity,
   onUndoActivity,
 }: {
@@ -747,6 +797,7 @@ function OperationsDeck({
   activityHistoryCount: number;
   isSavingActivity: boolean;
   onHotKey: (hotKey: Gen2HotKey) => void;
+  onOpenActivityLab: () => void;
   onSaveActivity: () => void;
   onUndoActivity: () => void;
 }) {
@@ -766,7 +817,7 @@ function OperationsDeck({
           <strong>ACTIVITY ENGINE</strong>
           <span>{activityState.phaseLabel} · TICK {activityState.tick}</span>
         </div>
-        <em className="activity-engine-subtitle">Route arrivals now mutate inventory and feed entries.</em>
+        <em className="activity-engine-subtitle">Route arrivals and manual lab controls mutate inventory and feed entries.</em>
         <div className="activity-inventory-grid">
           <span><b>{inv.packaging}</b> PKG</span>
           <span><b>{inv.extractionBatches}</b> EXT</span>
@@ -779,6 +830,7 @@ function OperationsDeck({
           {activityState.feed.map((event) => <span key={event.id} className={`activity-feed-${event.kind}`}>{event.message}</span>)}
         </div>
         <div className="activity-snapshot-bar">
+          <button type="button" onClick={onOpenActivityLab}>OPEN ACTIVITY LAB</button>
           <button type="button" onClick={onSaveActivity} disabled={isSavingActivity}>SAVE LOOP</button>
           <button type="button" onClick={onUndoActivity} disabled={isSavingActivity || activityHistoryCount < 1}>UNDO LOOP</button>
           <em>{activityStatus}</em>
@@ -786,6 +838,67 @@ function OperationsDeck({
       </div>
       <em>WO LOG: {gen2ReportLogPath}</em>
       <em>{gen2PerformanceBriefs[0]}</em>
+    </div>
+  );
+}
+
+function ActivityLabDrawer({
+  activityState,
+  intercomNotice,
+  isSavingActivity,
+  activityHistoryCount,
+  onRunControl,
+  onSaveActivity,
+  onUndoActivity,
+  onClose,
+}: {
+  activityState: ActivityState;
+  intercomNotice: string;
+  isSavingActivity: boolean;
+  activityHistoryCount: number;
+  onRunControl: (control: ActivityControl) => void;
+  onSaveActivity: () => void;
+  onUndoActivity: () => void;
+  onClose: () => void;
+}) {
+  const inv = activityState.inventory;
+  return (
+    <div className="activity-lab-drawer" role="dialog" aria-label="Activity Lab Controls">
+      <div className="activity-lab-title">
+        <div>
+          <strong>ACTIVITY LAB</strong>
+          <span>{activityState.phaseLabel} · TICK {activityState.tick}</span>
+        </div>
+        <button type="button" onClick={onClose}>CLOSE</button>
+      </div>
+      <div className="activity-intercom-screen">{intercomNotice}</div>
+      <div className="activity-lab-inventory">
+        <span><b>{inv.packaging}</b><em>Packaging</em></span>
+        <span><b>{inv.extractionBatches}</b><em>Extraction</em></span>
+        <span><b>{inv.rdSamples}</b><em>R&D samples</em></span>
+        <span><b>{inv.rdPassed}</b><em>Pass tickets</em></span>
+        <span><b>{inv.rdFailed}</b><em>Failed tests</em></span>
+        <span><b>{inv.salesStock}</b><em>Sales stock</em></span>
+        <span><b>{inv.managerRequests}</b><em>Mgr queue</em></span>
+      </div>
+      <div className="activity-control-grid">
+        <button type="button" onClick={() => onRunControl("seed-packaging")}>SEED PACKAGING</button>
+        <button type="button" onClick={() => onRunControl("force-extraction")}>FORCE EXTRACTION BATCH</button>
+        <button type="button" onClick={() => onRunControl("force-rd-pass")}>FORCE R&D PASS</button>
+        <button type="button" onClick={() => onRunControl("force-rd-fail")}>FORCE R&D FAIL</button>
+        <button type="button" onClick={() => onRunControl("clear-manager-requests")}>CLEAR MANAGER REQUESTS</button>
+      </div>
+      <div className="activity-lab-feed">
+        {activityState.feed.map((event) => (
+          <span key={event.id} className={`activity-feed-${event.kind}`}>
+            <b>#{event.tick}</b> {roomLabel(event.roomId)} — {event.message}
+          </span>
+        ))}
+      </div>
+      <div className="activity-lab-actions">
+        <button type="button" onClick={onSaveActivity} disabled={isSavingActivity}>SAVE LOOP</button>
+        <button type="button" onClick={onUndoActivity} disabled={isSavingActivity || activityHistoryCount < 1}>UNDO LOOP</button>
+      </div>
     </div>
   );
 }

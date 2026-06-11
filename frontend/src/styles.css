@@ -391,6 +391,146 @@ select {
   padding: 3px 5px;
 }
 
+
+.activity-intercom {
+  background: #fff2d4;
+  border-color: #2a8f55;
+  color: #11151d;
+}
+
+.activity-feed-control { border-left-color: #2a8f55 !important; }
+
+.activity-lab-drawer {
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  z-index: 120;
+  width: min(520px, calc(100% - 36px));
+  max-height: calc(100% - 36px);
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  border: 4px solid #11151d;
+  background: #e8f0df;
+  color: #11151d;
+  padding: 12px;
+  box-shadow: 0 10px 0 rgba(17, 21, 29, 0.36), inset 0 0 0 2px #fff2d4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-transform: uppercase;
+}
+
+.activity-lab-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 10px;
+}
+
+.activity-lab-title div {
+  display: grid;
+  gap: 2px;
+}
+
+.activity-lab-title strong {
+  font-size: 1rem;
+}
+
+.activity-lab-title span,
+.activity-lab-title button,
+.activity-control-grid button,
+.activity-lab-actions button {
+  font: inherit;
+  font-size: 0.62rem;
+}
+
+.activity-lab-title button,
+.activity-control-grid button,
+.activity-lab-actions button {
+  border: 3px solid #11151d;
+  background: #fff2d4;
+  color: #11151d;
+  padding: 6px 8px;
+  box-shadow: inset 0 -2px 0 rgba(17, 21, 29, 0.18);
+}
+
+.activity-lab-title button:hover,
+.activity-control-grid button:hover,
+.activity-lab-actions button:hover {
+  background: #cfe8d1;
+}
+
+.activity-lab-title button:disabled,
+.activity-control-grid button:disabled,
+.activity-lab-actions button:disabled {
+  opacity: 0.55;
+}
+
+.activity-intercom-screen {
+  border: 3px solid #11151d;
+  background: #11151d;
+  color: #8df0a4;
+  padding: 9px;
+  line-height: 1.35;
+  min-height: 48px;
+  box-shadow: inset 0 0 0 2px rgba(141, 240, 164, 0.18);
+}
+
+.activity-lab-inventory {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.activity-lab-inventory span {
+  display: grid;
+  gap: 2px;
+  border: 3px solid #11151d;
+  background: #fff2d4;
+  padding: 7px;
+}
+
+.activity-lab-inventory b {
+  color: #2a8f55;
+  font-size: 1rem;
+}
+
+.activity-lab-inventory em {
+  color: #5e6b65;
+  font-style: normal;
+  font-size: 0.52rem;
+}
+
+.activity-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.activity-lab-feed {
+  display: grid;
+  gap: 5px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.activity-lab-feed span {
+  border-left: 5px solid #5e6b65;
+  background: rgba(255, 242, 212, 0.9);
+  padding: 6px 8px;
+  font-size: 0.58rem;
+  line-height: 1.35;
+}
+
+.activity-lab-feed b {
+  color: #2a8f55;
+}
+
+.activity-lab-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .gen2-selection-card {
   position: relative;
   display: grid;
