@@ -66,6 +66,8 @@ type ActivityState = {
 };
 
 type ActivityControl = "seed-packaging" | "force-extraction" | "force-rd-pass" | "force-rd-fail" | "clear-manager-requests";
+type ActivityScenario = "normal-shift" | "rd-failure-storm" | "sales-push" | "manager-sweep";
+type ActivityRoomBadge = { label: string; tone: "ready" | "warn" | "busy" };
 
 type LiveNpc = Gen2Npc & {
   routeIndex: number;
@@ -284,7 +286,11 @@ export function Gen2FacilityDashboard() {
       .filter((arrival) => arrival.toRoomId && arrival.toRoomId !== arrival.fromRoomId);
     previousNpcRoomsRef.current = nextRooms;
     if (arrivals.length) {
-      setActivityState((current) => advanceActivityState(current, arrivals, productionPhase, incidentPhase));
+      setActivityState((current) => {
+        const next = advanceActivityState(current, arrivals, productionPhase, incidentPhase);
+        if (next.feed[0]?.id !== current.feed[0]?.id) setIntercomNotice(`INTERCOM: ${next.feed[0].message}`);
+        return next;
+      });
     }
   }, [npcs, productionPhase, incidentPhase]);
 
@@ -392,6 +398,13 @@ export function Gen2FacilityDashboard() {
     setActivityState(result.state);
     setIntercomNotice(result.event.message);
     setActivitySnapshotStatus(`Manual Activity Lab control queued: ${result.event.message}`);
+  }
+
+  function runActivityScenario(scenario: ActivityScenario) {
+    const result = applyActivityScenario(activityState, scenario);
+    setActivityState(result.state);
+    setIntercomNotice(result.event.message);
+    setActivitySnapshotStatus(`Activity Lab scenario loaded: ${result.event.message}`);
   }
 
   async function undoActivityCheckpoint() {
@@ -541,7 +554,7 @@ export function Gen2FacilityDashboard() {
                 <HallView key={`hall-${index}`} hall={hall} />
               ))}
               {gen2Rooms.map((room) => (
-                <RoomView key={room.id} room={room} roomVitals={roomVitals} onOpen={openRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onContextMenu={openContextMenu} />
+                <RoomView key={room.id} room={room} roomVitals={roomVitals} activityState={activityState} onOpen={openRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onContextMenu={openContextMenu} />
               ))}
               {gen2Props.map((prop, index) => (
                 <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} onFacilityEditor={() => openGrowOps("facility")} />
@@ -552,12 +565,12 @@ export function Gen2FacilityDashboard() {
               <RoutePathOverlay npc={npcs.find((item) => item.id === highlightRouteId)} />
             </div>
           ) : (
-            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
+            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} activityState={activityState} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
           )}
           {contextMenu ? <ContextMenu menu={contextMenu} onClose={() => setContextMenu(undefined)} /> : null}
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
-          {activityLabOpen ? <ActivityLabDrawer activityState={activityState} intercomNotice={intercomNotice} onRunControl={runActivityControl} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} onClose={() => setActivityLabOpen(false)} isSavingActivity={isSavingActivity} activityHistoryCount={activityHistoryCount} /> : null}
+          {activityLabOpen ? <ActivityLabDrawer activityState={activityState} intercomNotice={intercomNotice} onRunControl={runActivityControl} onRunScenario={runActivityScenario} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} onClose={() => setActivityLabOpen(false)} isSavingActivity={isSavingActivity} activityHistoryCount={activityHistoryCount} /> : null}
           {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} focusStaffId={growOpsFocusStaffId} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} onRestoreStaff={(nextStaff) => setStaff(Object.fromEntries(Object.entries(nextStaff).map(([id, item]) => [id, cleanGrowOpsStaff({ ...(item as GrowOpsStaff), id })])))} onPreviewRoute={(id) => { setHighlightRouteId(id); setStaffBattleId(id); }} onClearRoutePreview={() => setHighlightRouteId(undefined)} /> : null}
         </div>
 
@@ -747,6 +760,53 @@ function applyManualActivityControl(current: ActivityState, control: ActivityCon
   };
 }
 
+function applyActivityScenario(current: ActivityState, scenario: ActivityScenario): { state: ActivityState; event: ActivityEvent } {
+  const inventory = { ...current.inventory };
+  const tick = current.tick + 1;
+  let message = "INTERCOM: Activity scenario loaded.";
+  let phaseLabel = "SCENARIO LOADED";
+  if (scenario === "normal-shift") {
+    inventory.packaging += 3;
+    inventory.extractionBatches += 1;
+    inventory.rdSamples += 1;
+    phaseLabel = "NORMAL SHIFT";
+    message = "INTERCOM: Normal production shift staged across Packaging, Extraction, and R&D.";
+  }
+  if (scenario === "rd-failure-storm") {
+    inventory.rdSamples = Math.max(0, inventory.rdSamples - 2);
+    inventory.rdFailed += 3;
+    inventory.managerRequests += 3;
+    phaseLabel = "R&D FAILURE STORM";
+    message = "INTERCOM: R&D failure storm queued; managers requested on deck.";
+  }
+  if (scenario === "sales-push") {
+    inventory.rdPassed += 2;
+    inventory.salesStock += 6;
+    phaseLabel = "SALES PUSH";
+    message = "INTERCOM: Sales push loaded; passed inventory moved toward Sales stock.";
+  }
+  if (scenario === "manager-sweep") {
+    const cleared = inventory.managerRequests;
+    inventory.managerRequests = 0;
+    inventory.rdFailed = Math.max(0, inventory.rdFailed - 1);
+    phaseLabel = "MANAGER SWEEP";
+    message = `INTERCOM: Manager sweep completed; cleared ${cleared} request${cleared === 1 ? "" : "s"}.`;
+  }
+  const event: ActivityEvent = { id: `scenario-${tick}-${scenario}`, tick, roomId: "ops", kind: "control", message };
+  return { event, state: { ...current, tick, phaseLabel, inventory, feed: [event, ...current.feed].slice(0, 30) } };
+}
+
+function activityBadgeForRoom(roomId: string, state: ActivityState): ActivityRoomBadge | undefined {
+  const inv = state.inventory;
+  if (roomId === "pack") return inv.packaging < 3 ? { label: "LOW PKG", tone: "warn" } : { label: `${inv.packaging} PKG`, tone: "ready" };
+  if (roomId === "extract") return inv.extractionBatches > 4 ? { label: "EXT STACK", tone: "busy" } : inv.packaging < 1 ? { label: "WAIT PKG", tone: "warn" } : { label: `${inv.extractionBatches} EXT`, tone: "ready" };
+  if (roomId === "rd1") return inv.extractionBatches < 1 ? { label: "WAIT EXT", tone: "warn" } : { label: `${inv.rdSamples} SAMPLE`, tone: "ready" };
+  if (roomId === "rd2") return inv.managerRequests > 0 || inv.rdFailed > 2 ? { label: `${inv.managerRequests} MGR`, tone: "warn" } : { label: `${inv.rdPassed} PASS`, tone: "ready" };
+  if (roomId === "sales") return inv.salesStock > 8 ? { label: "SALES FULL", tone: "busy" } : { label: `${inv.salesStock} STOCK`, tone: "ready" };
+  if (["ops", "cultMgr", "boss"].includes(roomId) && inv.managerRequests > 0) return { label: `${inv.managerRequests} REQ`, tone: "warn" };
+  return undefined;
+}
+
 function activityEventForArrival(npc: LiveNpc, fromRoomId: string | undefined, toRoomId: string | undefined, tick: number, incidentPhase: number): ActivityEvent | undefined {
   if (!toRoomId || toRoomId === fromRoomId) return undefined;
   const name = gen2WorkerIdentity[npc.id]?.name ?? npc.id.replace(/([A-Z])/g, " $1");
@@ -848,6 +908,7 @@ function ActivityLabDrawer({
   isSavingActivity,
   activityHistoryCount,
   onRunControl,
+  onRunScenario,
   onSaveActivity,
   onUndoActivity,
   onClose,
@@ -857,6 +918,7 @@ function ActivityLabDrawer({
   isSavingActivity: boolean;
   activityHistoryCount: number;
   onRunControl: (control: ActivityControl) => void;
+  onRunScenario: (scenario: ActivityScenario) => void;
   onSaveActivity: () => void;
   onUndoActivity: () => void;
   onClose: () => void;
@@ -881,12 +943,20 @@ function ActivityLabDrawer({
         <span><b>{inv.salesStock}</b><em>Sales stock</em></span>
         <span><b>{inv.managerRequests}</b><em>Mgr queue</em></span>
       </div>
+      <strong className="activity-lab-section-title">MANUAL CONTROLS</strong>
       <div className="activity-control-grid">
         <button type="button" onClick={() => onRunControl("seed-packaging")}>SEED PACKAGING</button>
         <button type="button" onClick={() => onRunControl("force-extraction")}>FORCE EXTRACTION BATCH</button>
         <button type="button" onClick={() => onRunControl("force-rd-pass")}>FORCE R&D PASS</button>
         <button type="button" onClick={() => onRunControl("force-rd-fail")}>FORCE R&D FAIL</button>
         <button type="button" onClick={() => onRunControl("clear-manager-requests")}>CLEAR MANAGER REQUESTS</button>
+      </div>
+      <strong className="activity-lab-section-title">SCENARIO PRESETS</strong>
+      <div className="activity-control-grid activity-scenario-grid">
+        <button type="button" onClick={() => onRunScenario("normal-shift")}>NORMAL SHIFT</button>
+        <button type="button" onClick={() => onRunScenario("rd-failure-storm")}>R&D FAILURE STORM</button>
+        <button type="button" onClick={() => onRunScenario("sales-push")}>SALES PUSH</button>
+        <button type="button" onClick={() => onRunScenario("manager-sweep")}>MANAGER SWEEP</button>
       </div>
       <div className="activity-lab-feed">
         {activityState.feed.map((event) => (
@@ -1357,6 +1427,7 @@ function RoomDetail({
   npcs,
   staff,
   roomVitals,
+  activityState,
   productionPhase,
   incidentPhase,
   incidentTargetRoom,
@@ -1375,6 +1446,7 @@ function RoomDetail({
   npcs: LiveNpc[];
   staff: Record<string, GrowOpsStaff>;
   roomVitals: RoomVitals;
+  activityState: ActivityState;
   productionPhase: number;
   incidentPhase: number;
   incidentTargetRoom: "rd1" | "rd2";
@@ -1424,7 +1496,7 @@ function RoomDetail({
       </div>
       <div ref={stageRef} className="gen2-detail-stage">
         <div className={`gen2-detail-room gen2-floor-${floorFor(room)} ${roomOfflineClass(room, roomVitals)}`} style={{ left: roomLeft, top: roomTop, width: roomWidth, height: roomHeight, transform: `scale(${scale})` }}>
-          <RoomFrame room={room} roomVitals={roomVitals} />
+          <RoomFrame room={room} roomVitals={roomVitals} activityState={activityState} />
           {roomProps.map((prop, index) => (
             <PropView key={`${room.id}-${prop.kind}-${index}`} prop={{ ...prop, x: prop.x - room.x, y: prop.y - room.y }} originalProp={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={onSelect} onContextMenu={onContextMenu} onTerminalOpen={onTerminalOpen} onFacilityEditor={onFacilityEditor} detail />
           ))}
@@ -1449,6 +1521,7 @@ function HallView({ hall }: { hall: { x: number; y: number; w: number; h: number
 function RoomView({
   room,
   roomVitals,
+  activityState,
   onOpen,
   onGrowOps,
   onFacilityEditor,
@@ -1457,6 +1530,7 @@ function RoomView({
 }: {
   room: Gen2Room;
   roomVitals: RoomVitals;
+  activityState: ActivityState;
   onOpen: (room: Gen2Room) => void;
   onGrowOps: () => void;
   onFacilityEditor: () => void;
@@ -1481,16 +1555,18 @@ function RoomView({
         })
       }
     >
-      <RoomFrame room={room} roomVitals={roomVitals} />
+      <RoomFrame room={room} roomVitals={roomVitals} activityState={activityState} />
     </div>
   );
 }
 
-function RoomFrame({ room, roomVitals }: { room: Gen2Room; roomVitals: RoomVitals }) {
+function RoomFrame({ room, roomVitals, activityState }: { room: Gen2Room; roomVitals: RoomVitals; activityState?: ActivityState }) {
   const vitals = roomVitals[room.id];
+  const activityBadge = activityState ? activityBadgeForRoom(room.id, activityState) : undefined;
   return (
     <>
       <div className="gen2-label">{room.label}</div>
+      {activityBadge ? <div className={`activity-room-badge tone-${activityBadge.tone}`}>{activityBadge.label}</div> : null}
       {vitals ? (
         <div className={`gen2-room-vitals vitals-${vitals.status.toLowerCase()}`}>
           <strong>{vitals.primary}</strong>

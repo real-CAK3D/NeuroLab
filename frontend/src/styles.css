@@ -531,6 +531,46 @@ select {
   flex-wrap: wrap;
 }
 
+
+.activity-lab-section-title {
+  color: #11151d;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+}
+
+.activity-scenario-grid button {
+  background: #dce8ff;
+}
+
+.activity-room-badge {
+  position: absolute;
+  right: 4px;
+  top: 18px;
+  z-index: 8;
+  border: 2px solid #11151d;
+  background: #fff2d4;
+  color: #11151d;
+  padding: 2px 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.45rem;
+  line-height: 1;
+  box-shadow: 1px 1px 0 rgba(17, 21, 29, 0.35);
+  pointer-events: none;
+}
+
+.activity-room-badge.tone-ready {
+  background: #cfe8d1;
+}
+
+.activity-room-badge.tone-warn {
+  background: #ffd1c2;
+  animation: gen2Blink 1s steps(2, end) infinite;
+}
+
+.activity-room-badge.tone-busy {
+  background: #dce8ff;
+}
+
 .gen2-selection-card {
   position: relative;
   display: grid;
