@@ -16,15 +16,18 @@ import {
 import { gen2BossHotKeys, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
 import {
+  applyActivityStateSnapshot,
   applyFacilityLayoutSnapshot,
   applyStaffConfigSnapshot,
   chatWithOllama,
   getDockerStats,
   getFacilityDevices,
+  getActivityStateSnapshot,
   getFacilityLayoutSnapshot,
   getHostStats,
   getOllamaModels,
   getStaffConfigSnapshot,
+  undoActivityStateSnapshot,
   undoFacilityLayoutSnapshot,
   undoStaffConfigSnapshot,
   type DockerStats,
@@ -36,6 +39,31 @@ import {
   type StaffConfigSnapshot,
   type OllamaModels,
 } from "../utils/api";
+
+type ActivityInventory = {
+  packaging: number;
+  extractionBatches: number;
+  rdSamples: number;
+  rdPassed: number;
+  rdFailed: number;
+  salesStock: number;
+  managerRequests: number;
+};
+
+type ActivityEvent = {
+  id: string;
+  tick: number;
+  roomId: string;
+  kind: "packaging" | "extraction" | "research" | "test" | "sales" | "manager";
+  message: string;
+};
+
+type ActivityState = {
+  tick: number;
+  phaseLabel: string;
+  inventory: ActivityInventory;
+  feed: ActivityEvent[];
+};
 
 type LiveNpc = Gen2Npc & {
   routeIndex: number;
@@ -178,6 +206,9 @@ export function Gen2FacilityDashboard() {
   const [dockerStats, setDockerStats] = useState<DockerStats | undefined>();
   const [ollamaModels, setOllamaModels] = useState<OllamaModels | undefined>();
   const [facilityDevices, setFacilityDevices] = useState<FacilityDevices | undefined>();
+  const [activitySnapshotStatus, setActivitySnapshotStatus] = useState("Activity snapshots not loaded yet.");
+  const [activityHistoryCount, setActivityHistoryCount] = useState(0);
+  const [isSavingActivity, setIsSavingActivity] = useState(false);
   const [productionPhase, setProductionPhase] = useState(0);
   const [incidentPhase, setIncidentPhase] = useState(0);
   const [incidentTargetRoom, setIncidentTargetRoom] = useState<"rd1" | "rd2">("rd1");
@@ -188,6 +219,7 @@ export function Gen2FacilityDashboard() {
   const focusedRoom = focusedRoomId ? gen2Rooms.find((room) => room.id === focusedRoomId) : undefined;
   const staffBattleNpc = staffBattleId ? npcs.find((npc) => npc.id === staffBattleId) : undefined;
   const roomVitals = useMemo(() => buildLiveRoomVitals(hostStats, dockerStats, ollamaModels, facilityDevices), [hostStats, dockerStats, ollamaModels, facilityDevices]);
+  const activityState = useMemo(() => buildActivityState(productionPhase, incidentPhase, npcs), [productionPhase, incidentPhase, npcs]);
 
   useLayoutEffect(() => {
     function fitBoard() {
@@ -267,6 +299,20 @@ export function Gen2FacilityDashboard() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    getActivityStateSnapshot()
+      .then((state) => {
+        if (!active) return;
+        setActivityHistoryCount(state.history.length);
+        setActivitySnapshotStatus(state.current ? `Activity checkpoint ${state.current.id} loaded (${state.history.length} undo point${state.history.length === 1 ? "" : "s"}).` : "No activity checkpoint yet. Save one when the floor loop looks good.");
+      })
+      .catch((error) => {
+        if (active) setActivitySnapshotStatus(`Activity snapshot load failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
       const target = event.target as HTMLElement | null;
       const tagName = target?.tagName;
@@ -301,6 +347,34 @@ export function Gen2FacilityDashboard() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [dialog]);
+
+  async function saveActivityCheckpoint() {
+    setIsSavingActivity(true);
+    setActivitySnapshotStatus("Saving activity engine checkpoint...");
+    try {
+      const state = await applyActivityStateSnapshot({ state: activityState as unknown as Record<string, unknown>, note: `Activity engine tick ${activityState.tick}: ${activityState.phaseLabel}` });
+      setActivityHistoryCount(state.history.length);
+      setActivitySnapshotStatus(`Saved ${state.current?.id ?? "activity checkpoint"}. Undo points: ${state.history.length}.`);
+    } catch (error) {
+      setActivitySnapshotStatus(`Activity save failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsSavingActivity(false);
+    }
+  }
+
+  async function undoActivityCheckpoint() {
+    setIsSavingActivity(true);
+    setActivitySnapshotStatus("Restoring previous activity checkpoint...");
+    try {
+      const state = await undoActivityStateSnapshot();
+      setActivityHistoryCount(state.history.length);
+      setActivitySnapshotStatus(`Restored ${state.current?.id ?? "activity checkpoint"}. Undo points left: ${state.history.length}.`);
+    } catch (error) {
+      setActivitySnapshotStatus(`Activity undo failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsSavingActivity(false);
+    }
+  }
 
   function openRoom(room: Gen2Room) {
     setFocusedRoomId(room.id);
@@ -460,7 +534,7 @@ export function Gen2FacilityDashboard() {
             </div>
             {staffBattleNpc ? <WorkerBattlePanel npc={staffBattleNpc} staff={staff[staffBattleNpc.id]} mirror={spriteDialogMirror} onRouteView={() => setHighlightRouteId(staffBattleNpc.id)} onClose={() => { setStaffBattleId(undefined); setHighlightRouteId(undefined); }} docked /> : null}
           </div>
-          <OperationsDeck onHotKey={openHotKeyDialog} />
+          <OperationsDeck activityState={activityState} activityStatus={activitySnapshotStatus} activityHistoryCount={activityHistoryCount} isSavingActivity={isSavingActivity} onHotKey={openHotKeyDialog} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} />
           <SelectionCard selection={selection} />
         </div>
       </div>
@@ -491,7 +565,62 @@ function SpriteDialogMirror({ mirror }: { mirror?: SpriteDialogMirrorState }) {
   );
 }
 
-function OperationsDeck({ onHotKey }: { onHotKey: (hotKey: Gen2HotKey) => void }) {
+function buildActivityState(productionPhase: number, incidentPhase: number, npcs: LiveNpc[]): ActivityState {
+  const tick = productionPhase + incidentPhase * 6;
+  const roomCounts = countNpcsByRoom(npcs);
+  const packagingWorkers = roomCounts.pack ?? 0;
+  const extractionWorkers = roomCounts.extract ?? 0;
+  const rdWorkers = (roomCounts.rd1 ?? 0) + (roomCounts.rd2 ?? 0);
+  const salesWorkers = roomCounts.sales ?? 0;
+  const packageCargo = npcs.filter((npc) => npc.cargo === "package").length;
+  const extractCargo = npcs.filter((npc) => npc.cargo === "extract").length;
+  const testPulse = incidentPhase % 5;
+  const inventory: ActivityInventory = {
+    packaging: 8 + productionPhase * 2 + packagingWorkers + packageCargo,
+    extractionBatches: 2 + Math.floor((productionPhase + extractionWorkers + packageCargo) / 2),
+    rdSamples: 1 + rdWorkers + extractCargo + (incidentPhase % 3),
+    rdPassed: Math.max(0, Math.floor((tick + rdWorkers) / 5) % 9),
+    rdFailed: testPulse === 0 ? 1 : 0,
+    salesStock: 4 + salesWorkers + Math.floor((tick + 2) / 4) % 12,
+    managerRequests: testPulse === 0 ? 2 : incidentPhase % 2,
+  };
+  const phaseLabel = ["PACKAGING QUEUE", "EXTRACTION RUN", "R&D SAMPLE", "TEST REVIEW", "SALES READY", "MANAGER SWEEP"][productionPhase] ?? "LIVE LOOP";
+  const feed: ActivityEvent[] = [
+    { id: `pkg-${tick}`, tick, roomId: "pack", kind: "packaging", message: `Packaging staged ${inventory.packaging} units for extraction.` },
+    { id: `ext-${tick}`, tick, roomId: "extract", kind: "extraction", message: `Extraction running ${inventory.extractionBatches} active batch${inventory.extractionBatches === 1 ? "" : "es"}.` },
+    { id: `rd-${tick}`, tick, roomId: "rd1", kind: "research", message: `R&D holding ${inventory.rdSamples} sample${inventory.rdSamples === 1 ? "" : "s"} for test.` },
+    { id: `test-${tick}`, tick, roomId: "rd2", kind: "test", message: inventory.rdFailed ? "R&D Test flagged a failed sample; manager request queued." : `${inventory.rdPassed} test pass tickets ready for Sales.` },
+    { id: `sales-${tick}`, tick, roomId: "sales", kind: "sales", message: `Sales stock reads ${inventory.salesStock}; manager requests ${inventory.managerRequests}.` },
+  ];
+  return { tick, phaseLabel, inventory, feed };
+}
+
+function countNpcsByRoom(npcs: LiveNpc[]) {
+  return npcs.reduce<Record<string, number>>((counts, npc) => {
+    const room = roomAt(npc.x, npc.y)?.id;
+    if (room) counts[room] = (counts[room] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function OperationsDeck({
+  activityState,
+  activityStatus,
+  activityHistoryCount,
+  isSavingActivity,
+  onHotKey,
+  onSaveActivity,
+  onUndoActivity,
+}: {
+  activityState: ActivityState;
+  activityStatus: string;
+  activityHistoryCount: number;
+  isSavingActivity: boolean;
+  onHotKey: (hotKey: Gen2HotKey) => void;
+  onSaveActivity: () => void;
+  onUndoActivity: () => void;
+}) {
+  const inv = activityState.inventory;
   return (
     <div className="gen2-ops-deck">
       <strong>HOT KEYS</strong>
@@ -501,6 +630,28 @@ function OperationsDeck({ onHotKey }: { onHotKey: (hotKey: Gen2HotKey) => void }
             {hotKey.key} {hotKey.label}
           </button>
         ))}
+      </div>
+      <div className="activity-engine-card">
+        <div className="activity-engine-title">
+          <strong>ACTIVITY ENGINE</strong>
+          <span>{activityState.phaseLabel}</span>
+        </div>
+        <div className="activity-inventory-grid">
+          <span><b>{inv.packaging}</b> PKG</span>
+          <span><b>{inv.extractionBatches}</b> EXT</span>
+          <span><b>{inv.rdSamples}</b> R&D</span>
+          <span><b>{inv.rdPassed}</b> PASS</span>
+          <span><b>{inv.rdFailed}</b> FAIL</span>
+          <span><b>{inv.salesStock}</b> SALES</span>
+        </div>
+        <div className="activity-feed-list">
+          {activityState.feed.map((event) => <span key={event.id} className={`activity-feed-${event.kind}`}>{event.message}</span>)}
+        </div>
+        <div className="activity-snapshot-bar">
+          <button type="button" onClick={onSaveActivity} disabled={isSavingActivity}>SAVE LOOP</button>
+          <button type="button" onClick={onUndoActivity} disabled={isSavingActivity || activityHistoryCount < 1}>UNDO LOOP</button>
+          <em>{activityStatus}</em>
+        </div>
       </div>
       <em>WO LOG: {gen2ReportLogPath}</em>
       <em>{gen2PerformanceBriefs[0]}</em>

@@ -125,6 +125,19 @@ export type StaffConfigState = {
   history: StaffConfigSnapshot[];
 };
 
+export type ActivityStateSnapshot = {
+  id: string;
+  savedAt: string;
+  note: string;
+  state: Record<string, unknown>;
+  validation: { failures: string[]; warnings: string[] };
+};
+
+export type ActivityStateResponse = {
+  current: ActivityStateSnapshot | null;
+  history: ActivityStateSnapshot[];
+};
+
 export async function getBootstrap(): Promise<BootstrapPayload> {
   return fetchJson(`${backendUrl}/api/bootstrap`);
 }
@@ -213,6 +226,22 @@ export async function applyStaffConfigSnapshot(input: { staff: Record<string, un
 
 export async function undoStaffConfigSnapshot(): Promise<StaffConfigState> {
   return fetchJson(`${backendUrl}/api/staff-config/undo`, { method: "POST" });
+}
+
+export async function getActivityStateSnapshot(): Promise<ActivityStateResponse> {
+  return fetchJson(`${backendUrl}/api/activity-state`);
+}
+
+export async function applyActivityStateSnapshot(input: { state: Record<string, unknown>; note?: string }): Promise<ActivityStateResponse> {
+  return fetchJson(`${backendUrl}/api/activity-state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function undoActivityStateSnapshot(): Promise<ActivityStateResponse> {
+  return fetchJson(`${backendUrl}/api/activity-state/undo`, { method: "POST" });
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

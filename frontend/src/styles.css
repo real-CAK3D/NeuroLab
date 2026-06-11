@@ -310,6 +310,80 @@ select {
   border-left: 8px solid #11151d;
 }
 
+.activity-engine-card {
+  display: grid;
+  gap: 6px;
+  border: 3px solid #11151d;
+  background: #e8f0df;
+  padding: 7px;
+  box-shadow: inset 0 0 0 2px rgba(255, 242, 212, 0.5);
+}
+
+.activity-engine-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.activity-engine-title span {
+  color: #5e6b65;
+  font-size: 0.54rem;
+}
+
+.activity-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.activity-inventory-grid span {
+  border: 2px solid #11151d;
+  background: #fff2d4;
+  padding: 3px 4px;
+  font-size: 0.52rem;
+}
+
+.activity-inventory-grid b {
+  color: #2a8f55;
+}
+
+.activity-feed-list {
+  display: grid;
+  gap: 3px;
+  max-height: 110px;
+  overflow: auto;
+}
+
+.activity-feed-list span {
+  border-left: 4px solid #5e6b65;
+  background: rgba(255, 242, 212, 0.75);
+  padding: 3px 5px;
+  color: #11151d;
+  font-size: 0.53rem;
+  line-height: 1.2;
+}
+
+.activity-feed-packaging { border-left-color: #c09252 !important; }
+.activity-feed-extraction { border-left-color: #8e6fd1 !important; }
+.activity-feed-research { border-left-color: #4da6be !important; }
+.activity-feed-test { border-left-color: #d94f4f !important; }
+.activity-feed-sales { border-left-color: #43bd89 !important; }
+
+.activity-snapshot-bar {
+  display: grid;
+  gap: 4px;
+}
+
+.activity-snapshot-bar button {
+  border: 2px solid #11151d;
+  background: #f6eed8;
+  color: #11151d;
+  font: inherit;
+  font-size: 0.54rem;
+  padding: 3px 5px;
+}
+
 .gen2-selection-card {
   position: relative;
   display: grid;

@@ -144,6 +144,51 @@ export function apiRouter(): Router {
     res.json({ current: previous, history: remaining });
   });
 
+  router.get("/activity-state", (_req: Request, res: Response) => {
+    res.json(readActivityState());
+  });
+
+  router.post("/activity-state", (req: Request, res: Response) => {
+    const validation = validateActivityStateSnapshot(req.body);
+    if (validation.failures.length) return res.status(400).json({ error: "Invalid activity state snapshot", failures: validation.failures });
+
+    const current = readActivityState();
+    const snapshot = {
+      id: `activity-${Date.now()}`,
+      savedAt: new Date().toISOString(),
+      note: typeof req.body?.note === "string" ? req.body.note.slice(0, 160) : "Activity engine checkpoint",
+      state: req.body.state,
+      validation,
+    };
+    const history = [current.current, ...current.history].filter(Boolean).slice(0, 12);
+    writeSetting("activity_state_current", snapshot);
+    writeSetting("activity_state_history", history);
+    eventBus.publish({
+      type: "ACTIVITY_STATE",
+      message: `Activity state checkpoint saved: ${snapshot.note}`,
+      entity_type: "activity-state",
+      entity_id: null,
+      payload: snapshot,
+    });
+    res.status(201).json({ current: snapshot, history });
+  });
+
+  router.post("/activity-state/undo", (_req: Request, res: Response) => {
+    const state = readActivityState();
+    const [previous, ...remaining] = state.history as Array<Record<string, any>>;
+    if (!previous) return res.status(409).json({ error: "No activity state snapshot is available to restore" });
+    writeSetting("activity_state_current", previous);
+    writeSetting("activity_state_history", remaining);
+    eventBus.publish({
+      type: "ACTIVITY_STATE",
+      message: `Activity state checkpoint restored: ${previous.note ?? previous.id}`,
+      entity_type: "activity-state",
+      entity_id: null,
+      payload: previous,
+    });
+    res.json({ current: previous, history: remaining });
+  });
+
   router.get("/system/host", async (_req: Request, res: Response) => {
     const cpu = await sampleCpuUsage();
     const totalMemory = os.totalmem();
@@ -593,6 +638,30 @@ function validateStaffConfigSnapshot(input: any) {
     if (typeof item?.stationRoomId !== "string" || !item.stationRoomId.trim()) warnings.push(`${id} missing station room`);
     if (!Number.isFinite(item?.age) || item.age < 18 || item.age > 99) warnings.push(`${id} age is outside normal staff range`);
   }
+  return { failures, warnings };
+}
+
+function readActivityState() {
+  return {
+    current: readSetting("activity_state_current", null),
+    history: readSetting("activity_state_history", []),
+  };
+}
+
+function validateActivityStateSnapshot(input: any) {
+  const failures: string[] = [];
+  const warnings: string[] = [];
+  const state = input?.state;
+  if (!state || typeof state !== "object") failures.push("state must be an object");
+  if (!Number.isFinite(state?.tick)) failures.push("state.tick must be finite");
+  const inventory = state?.inventory;
+  if (!inventory || typeof inventory !== "object") failures.push("state.inventory must be an object");
+  for (const key of ["packaging", "extractionBatches", "rdSamples", "rdPassed", "rdFailed", "salesStock", "managerRequests"] as const) {
+    if (!Number.isFinite(inventory?.[key])) failures.push(`inventory.${key} must be finite`);
+    if (Number.isFinite(inventory?.[key]) && inventory[key] < 0) warnings.push(`inventory.${key} is negative`);
+  }
+  if (!Array.isArray(state?.feed)) failures.push("state.feed must be an array");
+  if (Array.isArray(state?.feed) && state.feed.length > 40) warnings.push("activity feed is longer than the visible dashboard limit");
   return { failures, warnings };
 }
 
