@@ -99,6 +99,51 @@ export function apiRouter(): Router {
     res.json({ current: previous, history: remaining });
   });
 
+  router.get("/staff-config", (_req: Request, res: Response) => {
+    res.json(readStaffConfigState());
+  });
+
+  router.post("/staff-config", (req: Request, res: Response) => {
+    const validation = validateStaffConfigSnapshot(req.body);
+    if (validation.failures.length) return res.status(400).json({ error: "Invalid staff config snapshot", failures: validation.failures });
+
+    const current = readStaffConfigState();
+    const snapshot = {
+      id: `staff-${Date.now()}`,
+      savedAt: new Date().toISOString(),
+      note: typeof req.body?.note === "string" ? req.body.note.slice(0, 160) : "Staff editor apply",
+      staff: req.body.staff,
+      validation,
+    };
+    const history = [current.current, ...current.history].filter(Boolean).slice(0, 12);
+    writeSetting("staff_config_current", snapshot);
+    writeSetting("staff_config_history", history);
+    eventBus.publish({
+      type: "STAFF_CONFIG",
+      message: `Staff config snapshot saved: ${snapshot.note}`,
+      entity_type: "staff-config",
+      entity_id: null,
+      payload: snapshot,
+    });
+    res.status(201).json({ current: snapshot, history });
+  });
+
+  router.post("/staff-config/undo", (_req: Request, res: Response) => {
+    const state = readStaffConfigState();
+    const [previous, ...remaining] = state.history as Array<Record<string, any>>;
+    if (!previous) return res.status(409).json({ error: "No staff config snapshot is available to restore" });
+    writeSetting("staff_config_current", previous);
+    writeSetting("staff_config_history", remaining);
+    eventBus.publish({
+      type: "STAFF_CONFIG",
+      message: `Staff config snapshot restored: ${previous.note ?? previous.id}`,
+      entity_type: "staff-config",
+      entity_id: null,
+      payload: previous,
+    });
+    res.json({ current: previous, history: remaining });
+  });
+
   router.get("/system/host", async (_req: Request, res: Response) => {
     const cpu = await sampleCpuUsage();
     const totalMemory = os.totalmem();
@@ -522,6 +567,33 @@ function readFacilityLayoutState() {
     current: readSetting("facility_layout_current", null),
     history: readSetting("facility_layout_history", []),
   };
+}
+
+function readStaffConfigState() {
+  return {
+    current: readSetting("staff_config_current", null),
+    history: readSetting("staff_config_history", []),
+  };
+}
+
+function validateStaffConfigSnapshot(input: any) {
+  const failures: string[] = [];
+  const warnings: string[] = [];
+  const staff = input?.staff && typeof input.staff === "object" && !Array.isArray(input.staff) ? input.staff : undefined;
+  if (!staff) failures.push("staff must be an object keyed by staff id");
+  const ids = new Set<string>();
+  for (const [id, item] of Object.entries(staff ?? {}) as Array<[string, any]>) {
+    if (!id.trim()) failures.push("staff id cannot be blank");
+    if (ids.has(id)) failures.push(`duplicate staff id: ${id}`);
+    ids.add(id);
+    if (item?.id && item.id !== id) warnings.push(`${id} payload id differs from key ${item.id}`);
+    if (typeof item?.name !== "string" || !item.name.trim()) failures.push(`${id} missing name`);
+    if (typeof item?.title !== "string" || !item.title.trim()) failures.push(`${id} missing title`);
+    if (typeof item?.role !== "string" || !item.role.trim()) failures.push(`${id} missing role`);
+    if (typeof item?.stationRoomId !== "string" || !item.stationRoomId.trim()) warnings.push(`${id} missing station room`);
+    if (!Number.isFinite(item?.age) || item.age < 18 || item.age > 99) warnings.push(`${id} age is outside normal staff range`);
+  }
+  return { failures, warnings };
 }
 
 function readSetting<T>(key: string, fallback: T): T {

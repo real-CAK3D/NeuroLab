@@ -17,19 +17,23 @@ import { gen2BossHotKeys, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOper
 import type { Gen2HotKey } from "../game/gen2OperationsData";
 import {
   applyFacilityLayoutSnapshot,
+  applyStaffConfigSnapshot,
   chatWithOllama,
   getDockerStats,
   getFacilityDevices,
   getFacilityLayoutSnapshot,
   getHostStats,
   getOllamaModels,
+  getStaffConfigSnapshot,
   undoFacilityLayoutSnapshot,
+  undoStaffConfigSnapshot,
   type DockerStats,
   type FacilityDeviceTelemetry,
   type FacilityDevices,
   type FacilityLayoutSnapshot,
   type FacilityLayoutRoom,
   type HostStats,
+  type StaffConfigSnapshot,
   type OllamaModels,
 } from "../utils/api";
 
@@ -169,6 +173,7 @@ export function Gen2FacilityDashboard() {
   const [highlightRouteId, setHighlightRouteId] = useState<string | undefined>();
   const [growOpsOpen, setGrowOpsOpen] = useState(false);
   const [growOpsInitialTab, setGrowOpsInitialTab] = useState<GrowOpsTab>("staff");
+  const [growOpsFocusStaffId, setGrowOpsFocusStaffId] = useState<string | undefined>();
   const [hostStats, setHostStats] = useState<HostStats | undefined>();
   const [dockerStats, setDockerStats] = useState<DockerStats | undefined>();
   const [ollamaModels, setOllamaModels] = useState<OllamaModels | undefined>();
@@ -339,9 +344,11 @@ export function Gen2FacilityDashboard() {
     });
   }
 
-  function openGrowOps(tab: GrowOpsTab = "staff") {
+  function openGrowOps(tab: GrowOpsTab = "staff", staffId?: string) {
     setGrowOpsInitialTab(tab);
+    setGrowOpsFocusStaffId(staffId);
     setGrowOpsOpen(true);
+    if (staffId) setStaffBattleId(staffId);
     setContextMenu(undefined);
   }
 
@@ -433,17 +440,17 @@ export function Gen2FacilityDashboard() {
                 <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} onFacilityEditor={() => openGrowOps("facility")} />
               ))}
               {npcs.map((npc) => (
-                <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onContextMenu={openContextMenu} />
+                <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} />
               ))}
               <RoutePathOverlay npc={npcs.find((item) => item.id === highlightRouteId)} />
             </div>
           ) : (
-            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
+            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
           )}
           {contextMenu ? <ContextMenu menu={contextMenu} onClose={() => setContextMenu(undefined)} /> : null}
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
-          {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} /> : null}
+          {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} focusStaffId={growOpsFocusStaffId} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} onRestoreStaff={(nextStaff) => setStaff(Object.fromEntries(Object.entries(nextStaff).map(([id, item]) => [id, cleanGrowOpsStaff({ ...(item as GrowOpsStaff), id })])))} onPreviewRoute={(id) => { setHighlightRouteId(id); setStaffBattleId(id); }} onClearRoutePreview={() => setHighlightRouteId(undefined)} /> : null}
         </div>
 
         <div className="gen2-info-row">
@@ -503,20 +510,28 @@ function OperationsDeck({ onHotKey }: { onHotKey: (hotKey: Gen2HotKey) => void }
 
 function GrowOpsPanel({
   initialTab = "staff",
+  focusStaffId,
   npcs,
   staff,
   vacantDuties,
   onClose,
   onSave,
   onRemove,
+  onRestoreStaff,
+  onPreviewRoute,
+  onClearRoutePreview,
 }: {
   initialTab?: GrowOpsTab;
+  focusStaffId?: string;
   npcs: LiveNpc[];
   staff: Record<string, GrowOpsStaff>;
   vacantDuties: VacantDuty[];
   onClose: () => void;
   onSave: (nextStaff: GrowOpsStaff, dutyId?: string) => void;
   onRemove: (id: string) => void;
+  onRestoreStaff: (nextStaff: Record<string, unknown>) => void;
+  onPreviewRoute: (id: string) => void;
+  onClearRoutePreview: () => void;
 }) {
   const firstStaffId = npcs[0]?.id ?? "boss";
   const [selectedId, setSelectedId] = useState(firstStaffId);
@@ -525,10 +540,19 @@ function GrowOpsPanel({
   const [draft, setDraft] = useState<GrowOpsStaff>(() => staff[firstStaffId] ?? defaultGrowOpsStaff(npcs[0] ?? gen2Npcs[0]));
   const [savedMessage, setSavedMessage] = useState("CHANGES WAIT FOR SAVE.");
   const [activeTab, setActiveTab] = useState<GrowOpsTab>(initialTab);
+  const [staffSnapshot, setStaffSnapshot] = useState<StaffConfigSnapshot | null>(null);
+  const [staffHistoryCount, setStaffHistoryCount] = useState(0);
+  const [staffSnapshotStatus, setStaffSnapshotStatus] = useState("Staff snapshots not loaded yet.");
+  const [isApplyingStaff, setIsApplyingStaff] = useState(false);
+  const selectedNpc = npcs.find((npc) => npc.id === selectedId);
 
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    if (focusStaffId && npcs.some((npc) => npc.id === focusStaffId)) loadExisting(focusStaffId);
+  }, [focusStaffId]);
 
   function loadExisting(id: string) {
     const npc = npcs.find((item) => item.id === id);
@@ -561,6 +585,57 @@ function GrowOpsPanel({
 
   function setField<K extends keyof GrowOpsStaff>(key: K, value: GrowOpsStaff[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  useEffect(() => {
+    let active = true;
+    getStaffConfigSnapshot()
+      .then((state) => {
+        if (!active) return;
+        setStaffSnapshot(state.current);
+        setStaffHistoryCount(state.history.length);
+        setStaffSnapshotStatus(state.current ? `Backend staff snapshot ${state.current.id} loaded (${state.history.length} undo point${state.history.length === 1 ? "" : "s"}).` : "No backend staff snapshot yet. Apply will create one.");
+      })
+      .catch((error) => {
+        if (active) setStaffSnapshotStatus(`Staff snapshot load failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => { active = false; };
+  }, []);
+
+  async function applyStaffSnapshot() {
+    const next = cleanGrowOpsStaff({ ...draft, custom: isCreating || draft.custom });
+    const nextStaff = { ...staff, [next.id]: next };
+    setIsApplyingStaff(true);
+    setStaffSnapshotStatus("Saving backend staff snapshot...");
+    try {
+      onSave(next, isCreating ? dutyId : undefined);
+      const state = await applyStaffConfigSnapshot({ staff: nextStaff, note: `Staff editor apply: ${next.name}` });
+      setStaffSnapshot(state.current);
+      setStaffHistoryCount(state.history.length);
+      setStaffSnapshotStatus(`Applied staff snapshot ${state.current?.id ?? "unknown"}. Undo points: ${state.history.length}.`);
+      setDraft(next);
+      setIsCreating(false);
+    } catch (error) {
+      setStaffSnapshotStatus(`Staff apply failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsApplyingStaff(false);
+    }
+  }
+
+  async function undoStaffSnapshot() {
+    setIsApplyingStaff(true);
+    setStaffSnapshotStatus("Restoring previous backend staff snapshot...");
+    try {
+      const state = await undoStaffConfigSnapshot();
+      setStaffSnapshot(state.current);
+      setStaffHistoryCount(state.history.length);
+      if (state.current?.staff) onRestoreStaff(state.current.staff);
+      setStaffSnapshotStatus(`Restored ${state.current?.id ?? "previous staff snapshot"}. Undo points left: ${state.history.length}.`);
+    } catch (error) {
+      setStaffSnapshotStatus(`Staff undo failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsApplyingStaff(false);
+    }
   }
 
   return (
@@ -601,6 +676,13 @@ function GrowOpsPanel({
               <em>{savedMessage}</em>
             </div>
           </div>
+          {selectedNpc ? <StaffRoutePreview npc={selectedNpc} staff={draft} onPreview={() => onPreviewRoute(selectedNpc.id)} onClear={onClearRoutePreview} /> : null}
+          <div className="staff-snapshot-panel">
+            <strong>STAFF SNAPSHOT</strong>
+            <span>{staffSnapshot ? `${staffSnapshot.id} @ ${new Date(staffSnapshot.savedAt).toLocaleTimeString()}` : "none yet"}</span>
+            <span>UNDO POINTS: {staffHistoryCount}</span>
+            <span>{staffSnapshotStatus}</span>
+          </div>
           <div className="grow-ops-grid">
             <label>NAME<input value={draft.name} onChange={(event) => setField("name", event.target.value)} required maxLength={24} /></label>
             <label>TITLE<input value={draft.title} onChange={(event) => setField("title", event.target.value)} required maxLength={34} /></label>
@@ -632,15 +714,37 @@ function GrowOpsPanel({
             <label className="grow-ops-wide">PERSONALITY<input value={draft.personality} onChange={(event) => setField("personality", event.target.value)} maxLength={72} /></label>
           </div>
           <div className="grow-ops-actions">
-            <button type="submit">SAVE</button>
-            <button type="button" onClick={() => isCreating ? beginHire() : loadExisting(selectedId)}>RESET DRAFT</button>
-            {!isCreating && !REQUIRED_STAFF_IDS.has(selectedId) ? <button type="button" className="grow-ops-remove" onClick={() => onRemove(selectedId)}>REMOVE SPRITE</button> : null}
+            <button type="submit" disabled={isApplyingStaff}>SAVE</button>
+            <button type="button" onClick={applyStaffSnapshot} disabled={isApplyingStaff}>APPLY STAFF SNAPSHOT</button>
+            <button type="button" onClick={undoStaffSnapshot} disabled={isApplyingStaff || staffHistoryCount < 1}>UNDO STAFF SNAPSHOT</button>
+            <button type="button" onClick={() => isCreating ? beginHire() : loadExisting(selectedId)} disabled={isApplyingStaff}>RESET DRAFT</button>
+            {!isCreating && !REQUIRED_STAFF_IDS.has(selectedId) ? <button type="button" className="grow-ops-remove" onClick={() => onRemove(selectedId)} disabled={isApplyingStaff}>REMOVE SPRITE</button> : null}
           </div>
         </form>
       </div>
       ) : (
         <FacilityEditorPanel />
       )}
+    </div>
+  );
+}
+
+function StaffRoutePreview({ npc, staff, onPreview, onClear }: { npc: LiveNpc; staff: GrowOpsStaff; onPreview: () => void; onClear: () => void }) {
+  const routeRooms = npc.route.map((step) => roomAt(step.x, step.y)?.label ?? `X${step.x} Y${step.y}`);
+  return (
+    <div className="staff-route-preview">
+      <div>
+        <strong>ROUTE / CARGO PREVIEW</strong>
+        <span>{staff.name} starts X{npc.x} Y{npc.y} facing {npc.dir.toUpperCase()}.</span>
+        <span>CARGO: {npc.cargo ? npc.cargo.toUpperCase() : "NONE"} / CARRY FLAG: {npc.carry ? "ON" : "OFF"}</span>
+      </div>
+      <ol>
+        {npc.route.slice(0, 6).map((step, index) => <li key={`${npc.id}-route-${index}`}>{index + 1}. {routeRooms[index]} — X{step.x} Y{step.y}{step.face ? ` / FACE ${step.face.toUpperCase()}` : ""}</li>)}
+      </ol>
+      <div className="staff-route-actions">
+        <button type="button" onClick={onPreview}>TEST ROUTE VIEW</button>
+        <button type="button" onClick={onClear}>CLEAR ROUTE VIEW</button>
+      </div>
     </div>
   );
 }
@@ -867,6 +971,7 @@ function RoomDetail({
   onFacilityEditor,
   onSelect,
   onStaffOpen,
+  onStaffEdit,
   onContextMenu,
   onTerminalOpen,
   highlightedRouteId,
@@ -884,6 +989,7 @@ function RoomDetail({
   onFacilityEditor: () => void;
   onSelect: (selection: Selection) => void;
   onStaffOpen: (npc: LiveNpc) => void;
+  onStaffEdit: (npc: LiveNpc) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
   onTerminalOpen: (prop: Gen2Prop) => void;
   highlightedRouteId?: string;
@@ -928,7 +1034,7 @@ function RoomDetail({
             <PropView key={`${room.id}-${prop.kind}-${index}`} prop={{ ...prop, x: prop.x - room.x, y: prop.y - room.y }} originalProp={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={onSelect} onContextMenu={onContextMenu} onTerminalOpen={onTerminalOpen} onFacilityEditor={onFacilityEditor} detail />
           ))}
           {roomNpcs.map((npc) => (
-            <NpcView key={`${room.id}-${npc.id}`} npc={{ ...npc, x: npc.x - room.x, y: npc.y - room.y }} originalNpc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={selectedNpcId === npc.id} onSelect={onSelect} onStaffOpen={onStaffOpen} onContextMenu={onContextMenu} detail />
+            <NpcView key={`${room.id}-${npc.id}`} npc={{ ...npc, x: npc.x - room.x, y: npc.y - room.y }} originalNpc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={selectedNpcId === npc.id} onSelect={onSelect} onStaffOpen={onStaffOpen} onStaffEdit={onStaffEdit} onContextMenu={onContextMenu} detail />
           ))}
           <RoutePathOverlay npc={roomNpcs.find((item) => item.id === highlightedRouteId)} origin={{ x: room.x, y: room.y }} />
         </div>
@@ -1076,6 +1182,7 @@ function NpcView({
   selected = false,
   onSelect,
   onStaffOpen,
+  onStaffEdit,
   onContextMenu,
   detail = false,
 }: {
@@ -1087,6 +1194,7 @@ function NpcView({
   selected?: boolean;
   onSelect: (selection: Selection) => void;
   onStaffOpen: (npc: LiveNpc) => void;
+  onStaffEdit: (npc: LiveNpc) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
   detail?: boolean;
 }) {
@@ -1108,6 +1216,8 @@ function NpcView({
           title: source.id.replace(/([A-Z])/g, " $1").toUpperCase(),
           items: [
             { label: "Staff stats", action: () => onSelect(staffSelection(source, staff)) },
+            { label: "Edit character", action: () => onStaffEdit(source) },
+            { label: "Preview route", action: () => onStaffOpen(source) },
             { label: "Send message", action: () => onSelect(actionSelection("MESSAGE", [`TO: ${source.role.toUpperCase()}`, "TEXT: CHECK STATUS", "STATUS: SENT"])) },
             { label: "Assign route", action: () => onSelect(actionSelection("ROUTE ASSIGN", [`STAFF: ${source.id.toUpperCase()}`, "MODE: ROOM TO ROOM", "STATUS: READY"])) },
           ],
@@ -1949,6 +2059,10 @@ function spriteDialogFor(npc: LiveNpc, staff: GrowOpsStaff, incidentPhase: numbe
     detail: `REPORTS TO: ${staff.reportTarget.toUpperCase()} · ROUTE ${npc.routeIndex + 1}/${Math.max(1, npc.route.length)}`,
     spriteRole: staff.role,
   };
+}
+
+function roomAt(x: number, y: number) {
+  return gen2Rooms.find((room) => x >= room.x && x < room.x + room.w && y >= room.y && y < room.y + room.h);
 }
 
 function staffSelection(npc: LiveNpc, staff?: GrowOpsStaff): Selection {

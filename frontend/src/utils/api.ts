@@ -112,6 +112,19 @@ export type FacilityLayoutState = {
   history: FacilityLayoutSnapshot[];
 };
 
+export type StaffConfigSnapshot = {
+  id: string;
+  savedAt: string;
+  note: string;
+  staff: Record<string, unknown>;
+  validation: { failures: string[]; warnings: string[] };
+};
+
+export type StaffConfigState = {
+  current: StaffConfigSnapshot | null;
+  history: StaffConfigSnapshot[];
+};
+
 export async function getBootstrap(): Promise<BootstrapPayload> {
   return fetchJson(`${backendUrl}/api/bootstrap`);
 }
@@ -184,6 +197,22 @@ export async function applyFacilityLayoutSnapshot(input: { rooms: FacilityLayout
 
 export async function undoFacilityLayoutSnapshot(): Promise<FacilityLayoutState> {
   return fetchJson(`${backendUrl}/api/facility-layout/undo`, { method: "POST" });
+}
+
+export async function getStaffConfigSnapshot(): Promise<StaffConfigState> {
+  return fetchJson(`${backendUrl}/api/staff-config`);
+}
+
+export async function applyStaffConfigSnapshot(input: { staff: Record<string, unknown>; note?: string }): Promise<StaffConfigState> {
+  return fetchJson(`${backendUrl}/api/staff-config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function undoStaffConfigSnapshot(): Promise<StaffConfigState> {
+  return fetchJson(`${backendUrl}/api/staff-config/undo`, { method: "POST" });
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
