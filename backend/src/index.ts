@@ -2,7 +2,7 @@ import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createLogger } from "../../shared/logging/logger";
 import { apiRouter } from "./api/routes";
-import { initDatabase } from "./database/db";
+import { db, initDatabase } from "./database/db";
 import { eventBus } from "./events/bus";
 import { connectWebsocketWithRetry } from "./websocket/client";
 
@@ -17,7 +17,12 @@ app.use(cors());
 app.use(express.json());
 
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ ok: true, service: "neurolab-backend", database: "ready" });
+  try {
+    db.prepare("SELECT 1").get();
+    res.json({ ok: true, service: "neurolab-backend", database: "ready", uptimeSeconds: Math.round(process.uptime()) });
+  } catch {
+    res.status(503).json({ ok: false, service: "neurolab-backend", database: "unavailable" });
+  }
 });
 
 app.use("/api", apiRouter());

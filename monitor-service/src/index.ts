@@ -1,5 +1,7 @@
-import cors from "cors";
+﻿import cors from "cors";
 import express, { type Request, type Response } from "express";
+import { statfsSync } from "node:fs";
+import os from "node:os";
 import { appConfig } from "../../shared/index";
 import { createLogger } from "../../shared/logging/logger";
 import { eventBus } from "./events/bus";
@@ -11,7 +13,7 @@ const app = express();
 app.use(cors());
 
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ ok: true, service: "neurolab-monitor", mode: "mock-read-only" });
+  res.json({ ok: true, service: "neurolab-monitor", mode: "os-read-only" });
 });
 
 app.get("/metrics", (_req: Request, res: Response) => {
@@ -41,12 +43,45 @@ app.listen(port, "0.0.0.0", () => {
   logger.info({ port, intervalMs: appConfig.simulation.infrastructurePollingMs }, "NeuroLab monitor placeholder listening");
 });
 
+let lastCpu = cpuTimes();
+let lastCpuPercent = 0;
+
+function cpuTimes() {
+  return os.cpus().reduce((acc, cpu) => {
+    acc.idle += cpu.times.idle;
+    acc.total += Object.values(cpu.times).reduce((sum, time) => sum + time, 0);
+    return acc;
+  }, { idle: 0, total: 0 });
+}
+
+// Real, read-only readings from the environment the monitor runs in (os + statfs); no writes, no Docker socket.
+function cpuPercent() {
+  const now = cpuTimes();
+  const totalDelta = now.total - lastCpu.total;
+  if (totalDelta > 0) lastCpuPercent = round1((1 - (now.idle - lastCpu.idle) / totalDelta) * 100);
+  lastCpu = now;
+  return lastCpuPercent;
+}
+
+function diskPercent() {
+  try {
+    const stats = statfsSync("/");
+    return stats.blocks > 0 ? round1((1 - stats.bavail / stats.blocks) * 100) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function round1(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
 function mockMetrics() {
   return {
-    mode: "mock-read-only",
-    cpu: sample(18, 66),
-    memory: sample(34, 78),
-    disk: sample(21, 59),
+    mode: "os-read-only",
+    cpu: cpuPercent(),
+    memory: round1((1 - os.freemem() / os.totalmem()) * 100),
+    disk: diskPercent(),
     uptimeSeconds: Math.round(process.uptime()),
     services: {
       backend: "unknown-safe",
@@ -103,8 +138,4 @@ function thresholdEvent(category: string, value: number, notice: number, warning
     recommendedAction: severity === "CRITICAL" ? "Boss briefing should prioritize this immediately." : "Manager should watch this trend.",
     rawMetadata: { value, notice, warning, critical },
   };
-}
-
-function sample(min: number, max: number) {
-  return Math.round((Math.random() * (max - min) + min) * 10) / 10;
 }

@@ -1,4 +1,4 @@
-import type { Request, Response, Router } from "express";
+﻿import type { Request, Response, Router } from "express";
 import { Router as createRouter } from "express";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -224,14 +224,60 @@ export function apiRouter(): Router {
     res.json({
       inbox: telemetryInboxPath(),
       sampledAt: new Date().toISOString(),
-      devices: await Promise.all([
-        readTelemetryDevice("nukebox", "NukeBox", "mother", process.env.TELEMETRY_NUKEBOX_PATH),
-        readTelemetryDevice("hp-laptop", "HP Laptop", "clone"),
-        readTelemetryDevice("the-bak3ry", "BAK3RY", "grow1"),
-        readTelemetryDevice("hack-safe", "Hack-Safe", "grow2"),
-        readTelemetryDevice("oracle-vm", "The Garden", "soil"),
-        readTelemetryDevice("cak3d-creations", "CAK3D-Creations", "vmCreations"),
-      ]),
+      devices: await readFacilityDevices(),
+    });
+  });
+
+  // Compact, read-only rollup used by external dashboards (e.g. Space-Ghost's Systems tab).
+  router.get("/summary", async (_req: Request, res: Response) => {
+    const [services, devices, cpu] = await Promise.all([probeServices(), readFacilityDevices(), sampleCpuUsage()]);
+    const count = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n;
+    const total = os.totalmem();
+    const lastEvent = db.prepare("SELECT type, message, created_at FROM events ORDER BY id DESC LIMIT 1").get() as { type: string; message: string; created_at: string } | undefined;
+    const lastAlert = db.prepare("SELECT level, title, created_at FROM alerts ORDER BY id DESC LIMIT 1").get() as { level: string; title: string; created_at: string } | undefined;
+    const online = devices.filter((device) => device.online).length;
+    const servicesDown = services.filter((service) => !service.ok).length;
+    res.json({
+      ok: servicesDown === 0,
+      service: "neurolab",
+      sampledAt: new Date().toISOString(),
+      tick: services.find((service) => service.id === "websocket")?.tick ?? null,
+      facility: {
+        employees: count("SELECT COUNT(*) AS n FROM employees"),
+        rooms: count("SELECT COUNT(*) AS n FROM rooms"),
+        departments: count("SELECT COUNT(*) AS n FROM departments"),
+        tasks: {
+          open: count("SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ('COMPLETED', 'CANCELLED')"),
+          queued: count("SELECT COUNT(*) AS n FROM tasks WHERE status = 'QUEUED'"),
+          completed: count("SELECT COUNT(*) AS n FROM tasks WHERE status = 'COMPLETED'"),
+        },
+        alerts: {
+          total: count("SELECT COUNT(*) AS n FROM alerts"),
+          critical: count("SELECT COUNT(*) AS n FROM alerts WHERE UPPER(level) = 'CRITICAL'"),
+          last: lastAlert ?? null,
+        },
+        lastEvent: lastEvent ?? null,
+      },
+      services,
+      host: {
+        hostname: os.hostname(),
+        cpuPercent: cpu.usedPercent,
+        memoryPercent: Math.round(((total - os.freemem()) / total) * 100),
+        uptimeSeconds: Math.round(os.uptime()),
+      },
+      telemetry: {
+        online,
+        total: devices.length,
+        stale: devices.filter((device) => device.stale).length,
+        devices: devices.map((device) => ({
+          id: device.id,
+          name: device.displayName,
+          online: device.online,
+          temperatureC: device.temperatureC,
+          cpuPercent: device.cpuPercent,
+          memoryPercent: device.memoryPercent,
+        })),
+      },
     });
   });
 
@@ -326,7 +372,7 @@ export function apiRouter(): Router {
     const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
     try {
       const response = await fetch(`${ollamaUrl}/api/tags`);
-      if (!response.ok) return res.status(response.status).json({ available: false, models: [], error: `Ollama request failed: ${response.status}` });
+      if (!response.ok) return res.json({ available: false, models: [], error: `Ollama request failed: ${response.status}` });
       const data = await response.json() as { models?: Array<Record<string, unknown>> };
       res.json({
         available: true,
@@ -340,7 +386,7 @@ export function apiRouter(): Router {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Unknown Ollama error";
-      res.status(502).json({ available: false, models: [], error: detail });
+      res.json({ available: false, models: [], error: detail });
     }
   });
 
@@ -522,6 +568,36 @@ async function readTelemetryDockerStats(cliError: string) {
 
 function telemetryInboxPath() {
   return process.env.TELEMETRY_INBOX_PATH || "/telemetry-inbox";
+}
+
+function readFacilityDevices() {
+  return Promise.all([
+    readTelemetryDevice("nukebox", "NukeBox", "mother", process.env.TELEMETRY_NUKEBOX_PATH),
+    readTelemetryDevice("hp-laptop", "HP Laptop", "clone"),
+    readTelemetryDevice("the-bak3ry", "BAK3RY", "grow1"),
+    readTelemetryDevice("hack-safe", "Hack-Safe", "grow2"),
+    readTelemetryDevice("oracle-vm", "The Garden", "soil"),
+    readTelemetryDevice("cak3d-creations", "CAK3D-Creations", "vmCreations"),
+  ]);
+}
+
+async function probeServices() {
+  const targets = [
+    { id: "backend", label: "Backend API", url: "http://127.0.0.1:" + (process.env.PORT || 3006) + "/health" },
+    { id: "websocket", label: "Simulation engine", url: (process.env.WEBSOCKET_URL || "http://neurolab-websocket:3007") + "/health" },
+    { id: "ai", label: "AI service", url: (process.env.AI_URL || "http://neurolab-ai:3008") + "/health" },
+    { id: "monitor", label: "Monitor daemon", url: (process.env.MONITOR_URL || "http://neurolab-monitor:3009") + "/health" },
+  ];
+  return Promise.all(targets.map(async ({ id, label, url }) => {
+    const started = Date.now();
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(2500) });
+      const body = await response.json().catch(() => ({})) as { tick?: number; mode?: string };
+      return { id, label, ok: response.ok, latencyMs: Date.now() - started, tick: typeof body.tick === "number" ? body.tick : undefined, mode: body.mode };
+    } catch (error) {
+      return { id, label, ok: false, latencyMs: Date.now() - started, tick: undefined, mode: undefined, error: error instanceof Error ? error.message : "unreachable" };
+    }
+  }));
 }
 
 async function readTelemetryDevice(folder: string, displayName: string, roomId: string, explicitPath?: string) {

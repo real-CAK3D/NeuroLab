@@ -4,11 +4,14 @@ NeuroLab is a Docker-hosted, browser-based mission-control dashboard for a livin
 
 ## Services
 
-- Frontend UI: `http://localhost:3005`
-- Backend API: `http://localhost:3006`
-- WebSocket engine: `http://localhost:3007`
-- AI service placeholder: `http://localhost:3008`
-- Monitor daemon placeholder: `http://localhost:3009`
+- Frontend UI (single public entry point): `http://localhost:3005`
+- Backend API: `http://127.0.0.1:3006` (proxied at `/api` by the frontend)
+- WebSocket engine: `http://127.0.0.1:3007`
+- AI service placeholder: `http://127.0.0.1:3008`
+- Monitor daemon (read-only OS metrics): `http://127.0.0.1:3009`
+
+Only port 3005 is exposed beyond the machine. The browser talks to it alone: the Vite server proxies
+`/api` to the backend, so the same build works on localhost, the LAN, and Tailscale.
 
 ## Run
 
@@ -22,14 +25,32 @@ Then open:
 http://localhost:3005
 ```
 
+Containers use `restart: unless-stopped`, so the stack returns after a reboot once Docker Desktop starts.
+
+## Remote access over Tailscale
+
+```powershell
+tailscale serve --bg --https=10000 http://127.0.0.1:3005
+```
+
+NeuroLab is then available on your tailnet at `https://<machine>.<tailnet>.ts.net:10000/`
+(tailnet only, not public). Stop it with `tailscale serve --https=10000 off`. Extra allowed
+host names can be set with `NEUROLAB_ALLOWED_HOSTS` (comma separated); `*.ts.net` is allowed by default.
+
+## Space-Ghost integration
+
+`GET /api/summary` returns a compact read-only rollup (service health + latency, simulation tick,
+staff/task/alert counts, and device telemetry online/stale). Space-Ghost's Systems tab shows it as
+the NeuroLab card (`spac3ghost/neurolab.py` in the Spac3-Gh0st repo).
+
 ## Health Checks
 
 ```text
-http://localhost:3006/health
-http://localhost:3007/health
-http://localhost:3008/health
-http://localhost:3009/health
+http://localhost:3005/health        (backend, via the frontend proxy)
+http://localhost:3005/api/summary   (all services at once)
 ```
+
+The other services answer `/health` on 127.0.0.1:3007-3009.
 
 ## Development Checks
 
@@ -60,5 +81,5 @@ npm run build
 - No local LLM/Ollama control yet.
 - No Docker write/control actions yet.
 - Frontend never accesses system resources directly.
-- Monitor daemon is read-only/mock-first.
+- Monitor daemon is read-only (real `os`/`statfs` readings; no writes, no Docker socket).
 - Docker socket is not exposed to the frontend.

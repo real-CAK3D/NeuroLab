@@ -1,5 +1,14 @@
+x-neurolab-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   neurolab-backend:
+    <<: *common
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -9,10 +18,13 @@ services:
       PORT: 3006
       DATABASE_PATH: /data/neurolab.sqlite
       WEBSOCKET_URL: http://neurolab-websocket:3007
+      AI_URL: http://neurolab-ai:3008
+      MONITOR_URL: http://neurolab-monitor:3009
       TELEMETRY_INBOX_PATH: /networking/Inbox
       TELEMETRY_NUKEBOX_PATH: /networking/Outbox/nukebox
+    # Backend/engine/AI/monitor are reached through the frontend proxy; keep them off the LAN.
     ports:
-      - "3006:3006"
+      - "127.0.0.1:3006:3006"
     volumes:
       - neurolab_database:/data
       - neurolab_config:/config
@@ -25,6 +37,7 @@ services:
       retries: 8
 
   neurolab-websocket:
+    <<: *common
     build:
       context: .
       dockerfile: websocket/Dockerfile
@@ -35,13 +48,14 @@ services:
       DATABASE_PATH: /data/neurolab.sqlite
       SIMULATION_TICK_MS: 3000
     ports:
-      - "3007:3007"
+      - "127.0.0.1:3007:3007"
     volumes:
       - neurolab_database:/data
       - neurolab_config:/config
       - neurolab_logs:/logs
     depends_on:
-      - neurolab-backend
+      neurolab-backend:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3007/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -49,6 +63,7 @@ services:
       retries: 8
 
   neurolab-ai:
+    <<: *common
     build:
       context: .
       dockerfile: ai-service/Dockerfile
@@ -57,11 +72,17 @@ services:
     environment:
       PORT: 3008
     ports:
-      - "3008:3008"
+      - "127.0.0.1:3008:3008"
     volumes:
       - neurolab_logs:/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3008/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   neurolab-monitor:
+    <<: *common
     build:
       context: .
       dockerfile: monitor-service/Dockerfile
@@ -70,28 +91,39 @@ services:
     environment:
       PORT: 3009
     ports:
-      - "3009:3009"
+      - "127.0.0.1:3009:3009"
     volumes:
       - neurolab_logs:/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3009/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   neurolab-frontend:
+    <<: *common
     build:
       context: .
       dockerfile: frontend/Dockerfile
     container_name: neurolab-frontend
     env_file: .env.example
     environment:
-      VITE_BACKEND_URL: http://localhost:3006
-      VITE_WEBSOCKET_URL: http://localhost:3007
-      VITE_AI_URL: http://localhost:3008
-      VITE_MONITOR_URL: http://localhost:3009
+      # The browser only ever talks to this one port; /api is proxied to the backend.
+      BACKEND_PROXY_TARGET: http://neurolab-backend:3006
+      NEUROLAB_ALLOWED_HOSTS: ${NEUROLAB_ALLOWED_HOSTS:-}
+    # Published on all interfaces so LAN and Tailscale (tailscale serve -> 127.0.0.1:3005) can reach it.
     ports:
       - "3005:3005"
     depends_on:
-      - neurolab-backend
-      - neurolab-websocket
-      - neurolab-ai
-      - neurolab-monitor
+      neurolab-backend:
+        condition: service_healthy
+      neurolab-websocket:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3005/api/summary').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
 
 volumes:
   neurolab_database:

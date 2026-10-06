@@ -1,7 +1,9 @@
 import { createIntercomMessageSchema, createTaskSchema } from "../../../shared/index";
 import type { BootstrapPayload, CreateIntercomMessageInput, CreateTaskInput, Employee, IntercomMessage, Room, Task } from "../types/domain";
 
-const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:3006";
+// Same-origin by default: the Vite server proxies /api to the backend, so the dashboard works
+// from localhost, the LAN, or a Tailscale URL without rebuilding. Set VITE_BACKEND_URL to override.
+const backendUrl = (import.meta.env.VITE_BACKEND_URL ?? "").replace(/\/$/, "");
 
 export type HostStats = {
   hostname: string;
