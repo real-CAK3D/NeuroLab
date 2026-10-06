@@ -12,6 +12,10 @@ import { eventBus } from "../events/bus";
 
 const execFileAsync = promisify(execFile);
 
+// Several dashboards may poll /api/summary; probe the services at most once per interval.
+const SUMMARY_TTL_MS = 3000;
+let summaryCache: { at: number; value: unknown } | undefined;
+
 export function apiRouter(): Router {
   const router = createRouter();
 
@@ -230,6 +234,7 @@ export function apiRouter(): Router {
 
   // Compact, read-only rollup used by external dashboards (e.g. Space-Ghost's Systems tab).
   router.get("/summary", async (_req: Request, res: Response) => {
+    if (summaryCache && Date.now() - summaryCache.at < SUMMARY_TTL_MS) return res.json(summaryCache.value);
     const [services, devices, cpu] = await Promise.all([probeServices(), readFacilityDevices(), sampleCpuUsage()]);
     const count = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n;
     const total = os.totalmem();
@@ -237,7 +242,7 @@ export function apiRouter(): Router {
     const lastAlert = db.prepare("SELECT level, title, created_at FROM alerts ORDER BY id DESC LIMIT 1").get() as { level: string; title: string; created_at: string } | undefined;
     const online = devices.filter((device) => device.online).length;
     const servicesDown = services.filter((service) => !service.ok).length;
-    res.json({
+    const payload = {
       ok: servicesDown === 0,
       service: "neurolab",
       sampledAt: new Date().toISOString(),
@@ -278,7 +283,9 @@ export function apiRouter(): Router {
           memoryPercent: device.memoryPercent,
         })),
       },
-    });
+    };
+    summaryCache = { at: Date.now(), value: payload };
+    res.json(payload);
   });
 
   router.post("/tasks", (req: Request, res: Response) => {

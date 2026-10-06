@@ -25,6 +25,17 @@ Then open:
 http://localhost:3005
 ```
 
+Or use the helper, which also starts Docker Desktop if needed, works around a broken Docker credential
+helper, and publishes the Tailscale URL:
+
+```powershell
+.\scripts
+eurolab-up.ps1            # add -NoTailscale or -TailscalePort 8444 as needed
+```
+
+The frontend is a production build served by `vite preview` (no dev server or HMR in the container).
+A status strip at the top of the page shows service health, tick, staff/tasks/alerts and telemetry.
+
 Containers use `restart: unless-stopped`, so the stack returns after a reboot once Docker Desktop starts.
 
 ## Remote access over Tailscale

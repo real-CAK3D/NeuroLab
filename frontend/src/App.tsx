@@ -1,4 +1,5 @@
 import { Gen2FacilityDashboard } from "./components/Gen2FacilityDashboard";
+import { StatusStrip } from "./components/StatusStrip";
 
 export function App() {
   return (
@@ -9,6 +10,7 @@ export function App() {
           <p className="font-mono text-xs uppercase tracking-normal text-[#cfc7b9]">Gen 2 facility dashboard.</p>
         </div>
       </section>
+      <StatusStrip />
       <Gen2FacilityDashboard />
       <section className="mx-auto max-w-[1400px] py-8 font-mono text-xs uppercase tracking-normal text-[#cfc7b9]">
         Page scroll remains active outside the facility board.

@@ -140,6 +140,32 @@ export type ActivityStateResponse = {
   history: ActivityStateSnapshot[];
 };
 
+export type NeuroLabSummary = {
+  ok: boolean;
+  sampledAt: string;
+  tick: number | null;
+  facility: {
+    employees: number;
+    rooms: number;
+    departments: number;
+    tasks: { open: number; queued: number; completed: number };
+    alerts: { total: number; critical: number; last: { level: string; title: string; created_at: string } | null };
+    lastEvent: { type: string; message: string; created_at: string } | null;
+  };
+  services: Array<{ id: string; label: string; ok: boolean; latencyMs: number; tick?: number; mode?: string; error?: string }>;
+  host: { hostname: string; cpuPercent: number; memoryPercent: number; uptimeSeconds: number };
+  telemetry: {
+    online: number;
+    total: number;
+    stale: number;
+    devices: Array<{ id: string; name: string; online: boolean; temperatureC: number | null; cpuPercent: number | null; memoryPercent: number | null }>;
+  };
+};
+
+export async function getSummary(): Promise<NeuroLabSummary> {
+  return fetchJson(`${backendUrl}/api/summary`);
+}
+
 export async function getBootstrap(): Promise<BootstrapPayload> {
   return fetchJson(`${backendUrl}/api/bootstrap`);
 }
@@ -247,7 +273,7 @@ export async function undoActivityStateSnapshot(): Promise<ActivityStateResponse
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...init });
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return response.json() as Promise<T>;
 }
