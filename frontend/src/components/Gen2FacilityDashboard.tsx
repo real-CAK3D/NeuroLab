@@ -1495,7 +1495,7 @@ function RoomDetail({
         {room.id === "screen" ? <button type="button" className="gb-view-button" onClick={onGrowOps}>Grow Ops</button> : null}
       </div>
       <div ref={stageRef} className="gen2-detail-stage">
-        <div className={`gen2-detail-room gen2-floor-${floorFor(room)} ${roomOfflineClass(room, roomVitals)}`} style={{ left: roomLeft, top: roomTop, width: roomWidth, height: roomHeight, transform: `scale(${scale})` }}>
+        <div className={`gen2-detail-room gen2-floor-${floorFor(room)} room-kind-${room.kind} ${roomOfflineClass(room, roomVitals)}`} style={{ left: roomLeft, top: roomTop, width: roomWidth, height: roomHeight, transform: `scale(${scale})` }}>
           <RoomFrame room={room} roomVitals={roomVitals} activityState={activityState} />
           {roomProps.map((prop, index) => (
             <PropView key={`${room.id}-${prop.kind}-${index}`} prop={{ ...prop, x: prop.x - room.x, y: prop.y - room.y }} originalProp={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={onSelect} onContextMenu={onContextMenu} onTerminalOpen={onTerminalOpen} onFacilityEditor={onFacilityEditor} detail />
@@ -1539,7 +1539,7 @@ function RoomView({
 }) {
   return (
     <div
-      className={`gen2-room gen2-floor-${floorFor(room)} ${roomOfflineClass(room, roomVitals)}`}
+      className={`gen2-room gen2-floor-${floorFor(room)} room-kind-${room.kind} ${roomOfflineClass(room, roomVitals)}`}
       style={rect(room)}
       onClick={() => onSelect(roomSelection(room, roomVitals))}
       onContextMenu={(event) =>
@@ -1616,7 +1616,7 @@ function PropView({
   return (
     <button
       type="button"
-      className={`gen2-prop prop-${prop.kind} ${isStressedPlant(source, roomVitals) ? "is-stressed-plant" : ""} ${environmentClass(source, roomVitals, incidentPhase, incidentTargetRoom)} ${productionClass(source, productionPhase, incidentPhase, incidentTargetRoom)} ${detail ? "is-detail-prop" : ""}`}
+      className={`gen2-prop prop-${prop.kind} ${spriteClass(source)} ${isStressedPlant(source, roomVitals) ? "is-stressed-plant" : ""} ${environmentClass(source, roomVitals, incidentPhase, incidentTargetRoom)} ${productionClass(source, productionPhase, incidentPhase, incidentTargetRoom)} ${detail ? "is-detail-prop" : ""}`}
       style={{ left: prop.x * GEN2_TILE, top: prop.y * GEN2_TILE, width: w, height: h }}
       onClick={(event) => {
         event.stopPropagation();
@@ -2563,8 +2563,9 @@ function propSelection(prop: Gen2Prop, roomVitals: RoomVitals): Selection {
     return { type: "equipment", title: monitor.title, lines: monitor.lines };
   }
   if (isPlant(prop)) {
-    const title = prop.kind === "tray" ? "CLONE TRAY" : prop.kind === "cutPlant" ? "DRYING HARVEST" : "CANNABIS PLANT";
-    const stage = prop.kind === "tray" ? "CLONE" : prop.kind === "cutPlant" ? "CURING" : "VEGETATIVE";
+    const growth = plantStage(prop);
+    const title = prop.kind === "tray" ? "CLONE TRAY" : prop.kind === "cutPlant" ? "DRYING HARVEST" : prop.room === "mother" ? "MOTHER PLANT" : "CANNABIS PLANT";
+    const stage = prop.kind === "cutPlant" ? "CURING" : PLANT_STAGE_LABEL[growth];
     return { type: "plant", title, lines: [`STAGE: ${stage}`, prop.kind === "cutPlant" ? "HUMIDITY: 54%" : "HEALTH: 94%", prop.kind === "cutPlant" ? "TRIM: QUEUED" : "WATER: NORMAL", prop.kind === "cutPlant" ? "AIRFLOW: ACTIVE" : "LIGHT: ACTIVE"] };
   }
   if (prop.kind === "crate") {
@@ -2580,6 +2581,40 @@ function propSelection(prop: Gen2Prop, roomVitals: RoomVitals): Selection {
 
 function actionSelection(title: string, lines: string[]): Selection {
   return { type: "equipment", title, lines };
+}
+
+type PlantStage = "clone" | "veg" | "flower" | "ripe";
+
+const PLANT_STAGE_LABEL: Record<PlantStage, string> = { clone: "CLONE", veg: "VEGETATIVE", flower: "FLOWERING", ripe: "RIPE - HARVEST READY" };
+
+// Growth stage drawn for a cannabis pot, derived from the room it sits in (clone room -> clones,
+// mother/grow 1 -> veg, grow 2/3 -> flowering, grow 4 -> ripe), with a little per-pot variety.
+function plantStage(prop: Gen2Prop): PlantStage {
+  const mix = (prop.x + prop.y) % 6 === 0;
+  if (prop.kind === "tray" || prop.room === "clone") return "clone";
+  if (prop.room === "grow2") return mix ? "veg" : "flower";
+  if (prop.room === "grow3") return mix ? "ripe" : "flower";
+  if (prop.room === "grow4") return mix ? "flower" : "ripe";
+  return "veg";
+}
+
+// Extra classes that switch a prop from its CSS-drawn look to a sprite (see styles.css / propSprites.css).
+function spriteClass(prop: Gen2Prop) {
+  const w = prop.w ?? 1;
+  const h = prop.h ?? 1;
+  if (prop.kind === "cutPlant") return "has-plant plant-dry";
+  if (prop.kind === "plant" || prop.kind === "plantBed" || prop.kind === "tray") {
+    return `has-plant plant-${plantStage(prop)} ${(prop.x + prop.y) % 4 >= 2 ? "plant-flip" : ""}`;
+  }
+  if (prop.kind === "desk" || prop.kind === "table" || prop.kind === "trimTable") return "has-frame spr-desk";
+  if (prop.kind === "shelf") return "has-frame spr-shelf";
+  if (prop.kind === "rack" && w >= 2) return "has-frame spr-rack";
+  if (prop.kind === "whiteboard") return "has-frame spr-screen";
+  if (prop.kind === "chair") return "has-sprite spr-chair";
+  if (prop.kind === "sink") return "has-sprite spr-sink";
+  if (prop.kind === "vat") return "has-sprite spr-vat";
+  if (prop.kind === "machine" && w >= 3 && h >= 3) return "has-sprite spr-machine";
+  return "";
 }
 
 function isPlant(prop: Gen2Prop) {
