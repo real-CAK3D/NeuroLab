@@ -14,9 +14,11 @@ import {
   type Gen2Prop,
   type Gen2Room,
 } from "../game/gen2FacilityData";
-import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
+import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2FormatClock12, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
 import { LifecyclePanel } from "./LifecyclePanel";
+import { WalkMode } from "../walk/WalkMode";
+import type { WalkDir, WalkHost, WalkNpc, WalkPlantLook, WalkView } from "../walk/walkTypes";
 import { lifecycleMockEnabled, mockLifecycleSnapshot } from "../game/lifecycleMock";
 import {
   deriveLifeEvents,
@@ -335,7 +337,7 @@ export function Gen2FacilityDashboard() {
   const [isSavingActivity, setIsSavingActivity] = useState(false);
   const [activityLabOpen, setActivityLabOpen] = useState(false);
   const [intercomNotice, setIntercomNotice] = useState("INTERCOM STANDBY — route arrivals and manual lab controls will appear here.");
-  const [clockText, setClockText] = useState(() => gen2FormatClock(clockMinuteNow()));
+  const [clockText, setClockText] = useState(() => gen2FormatClock12(clockMinuteNow()));
   const [productionPhase, setProductionPhase] = useState(0);
   const [incidentPhase, setIncidentPhase] = useState(0);
   const [incidentTargetRoom, setIncidentTargetRoom] = useState<"rd1" | "rd2">("rd1");
@@ -355,10 +357,21 @@ export function Gen2FacilityDashboard() {
   const pendingTasksRef = useRef<PendingTask[]>([]);
   npcsRef.current = npcs;
   const lifeContext = useMemo(() => ({ life, bubbles: lifeBubbles }), [life, lifeBubbles]);
+  const overviewTransform = `translate(${fitPan.x}px, ${fitPan.y}px) scale(${fitZoom})`;
   const roomVitals = useMemo(() => buildLiveRoomVitals(hostStats, dockerStats, ollamaModels, facilityDevices, life?.snap), [hostStats, dockerStats, ollamaModels, facilityDevices, life]);
   const [activityState, setActivityState] = useState<ActivityState>(() => loadPersistedActivityState(npcs));
   const previousNpcRoomsRef = useRef<Record<string, string | undefined>>(roomMapForNpcs(npcs));
   const simContextRef = useRef<NpcSimContext>(EMPTY_SIM_CONTEXT);
+
+  // Facility walk mode: the player is one more entity on the floor. The NPC sim only needs to know which tile is reserved.
+  const [walk, setWalk] = useState<WalkState>({ active: false, view: "top", full: false, pad: null, spawn: { x: 0, y: 0, dir: "right" } });
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  const walkPlayerRef = useRef<HTMLDivElement | null>(null);
+  const walkSpriteRef = useRef<HTMLSpanElement | null>(null);
+  const playerTileRef = useRef<{ x: number; y: number } | null>(null);
+  const walkAvoidRef = useRef<{ key: string; set: Set<string> } | undefined>(undefined);
+  const walkNpcCacheRef = useRef<{ src: LiveNpc[]; staff: Record<string, GrowOpsStaff>; out: WalkNpc[] } | undefined>(undefined);
+  const walkHostRef = useRef<WalkHost>(undefined as unknown as WalkHost);
 
   useLayoutEffect(() => {
     function fitBoard() {
@@ -393,7 +406,8 @@ export function Gen2FacilityDashboard() {
           queued: pendingTasksRef.current.map((task) => `${task.label} <- ${task.candidates.join("/")}`),
         });
       }
-      setNpcs((current) => advanceAllNpcs(applyTaskAssignments(current, dispatched.assignments), walkable, simContextRef.current, now));
+      // The tile under the walking player (when walk mode is on) is treated as a wall so NPCs re-path around it.
+      setNpcs((current) => advanceAllNpcs(applyTaskAssignments(current, dispatched.assignments), walkableAvoiding(walkable, playerTileRef.current, walkAvoidRef), simContextRef.current, now));
     }, MOVEMENT_TICK_MS);
     return () => window.clearInterval(interval);
   }, [walkable]);
@@ -451,7 +465,7 @@ export function Gen2FacilityDashboard() {
   }, []);
 
   useEffect(() => {
-    const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
+    const interval = window.setInterval(() => setClockText(gen2FormatClock12(clockMinuteNow())), 15000);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -625,7 +639,172 @@ export function Gen2FacilityDashboard() {
     }
   }
 
+  function enterFacility() {
+    if (walk.active) return;
+    setFocusedRoomId(undefined);
+    setContextMenu(undefined);
+    let spawn = pickWalkSpawn(npcsRef.current, walkable);
+    // dev aid: ?walkAt=x,y,dir starts the walk at a given tile (e.g. ?walkAt=57,20,down)
+    const walkAt = new URLSearchParams(window.location.search).get("walkAt")?.split(",");
+    if (walkAt && walkAt.length >= 2 && walkable.has(tileKey(Number(walkAt[0]), Number(walkAt[1])))) {
+      const dir = (["up", "down", "left", "right"] as const).find((item) => item === walkAt[2]) ?? "down";
+      spawn = { x: Number(walkAt[0]), y: Number(walkAt[1]), dir };
+    }
+    const touch = typeof window !== "undefined" && (window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 900);
+    setWalk({ active: true, view: "top", full: touch, pad: null, spawn });
+    setIntercomNotice("VISITOR BADGE ISSUED: ENTERED THE FACILITY AT THE SCREENING ROOM.");
+    setSelection(actionSelection("FACILITY WALK", ["ARROWS / WASD OR THE PAD TO MOVE", "A: INTERACT   B: BACK / EXIT", "V: SWITCH TOP-DOWN / FIRST PERSON"]));
+  }
+
+  function exitFacility() {
+    setWalk((current) => (current.active ? { ...current, active: false } : current));
+  }
+
+  function walkBack() {
+    if (contextMenu) { setContextMenu(undefined); return true; }
+    if (terminalSession) { setTerminalSession(undefined); return true; }
+    if (dialog) { setDialog(undefined); return true; }
+    if (growOpsOpen) { setGrowOpsOpen(false); return true; }
+    if (activityLabOpen) { setActivityLabOpen(false); return true; }
+    if (lifecycleOpen) { setLifecycleOpen(false); return true; }
+    if (selection || staffBattleId) {
+      setSelection(undefined);
+      setStaffBattleId(undefined);
+      setHighlightRouteId(undefined);
+      return true;
+    }
+    return false;
+  }
+
+  function walkPropAt(x: number, y: number) {
+    const covering = gen2Props.filter((prop) => !WALK_IGNORED_PROPS.has(prop.kind) && propCoversTile(prop, x, y));
+    covering.sort((a, b) => Number(gen2PropBlocksMovement(b)) - Number(gen2PropBlocksMovement(a)) || (a.w ?? 1) * (a.h ?? 1) - (b.w ?? 1) * (b.h ?? 1));
+    return covering[0];
+  }
+
+  function walkInteract(x: number, y: number): string | undefined {
+    const npc = npcsRef.current.find((item) => item.x === x && item.y === y);
+    if (npc) {
+      openStaffBattle(npc);
+      return undefined;
+    }
+    const prop = walkPropAt(x, y);
+    if (!prop) return "NOTHING THERE.";
+    setContextMenu(undefined);
+    if (prop.kind === "terminal" && prop.room === "rd2") {
+      openTerminal(prop);
+      return undefined;
+    }
+    setSelection(walkSelectionFor(prop));
+    return undefined;
+  }
+
+  /** The same card content for A, the caption strip and the first-person text faces. */
+  function walkSelectionFor(prop: Gen2Prop): Selection {
+    const lifeProp = lifePropState(prop, life, Date.now());
+    if (lifeProp?.selection) return lifeSelectionToSelection(lifeProp.selection);
+    if (prop.kind === "wallSign") return actionSelection("WALL SIGN", [(prop.label ?? "SIGN").toUpperCase(), `ROOM: ${roomLabel(prop.room ?? "")}`, ...walkVitalLines(prop.room)]);
+    if (prop.kind === "clock") return actionSelection("WALL CLOCK", [`TIME: ${gen2FormatClock12(clockMinuteNow())}`]);
+    if (prop.kind === "whiteboard") return actionSelection(`${roomLabel(prop.room ?? "")} WHITEBOARD`, walkWhiteboardLines(prop.room));
+    if (prop.kind === "bulletin") return actionSelection("BULLETIN BOARD", walkNoticeLines(prop.room));
+    return propSelection(prop, roomVitals);
+  }
+
+  function walkVitalLines(roomId?: string) {
+    const vital = roomId ? roomVitals[roomId] : undefined;
+    if (!vital) return [];
+    return [vital.lifePrimary, vital.lifeSecondary, vital.primary, vital.secondary].filter((line): line is string => !!line);
+  }
+
+  function walkWhiteboardLines(roomId?: string) {
+    const op = roomId ? gen2RoomOperations[roomId] : undefined;
+    if (!op) return ["NOTES", "NOTHING WRITTEN HERE"];
+    return [...walkVitalLines(roomId).slice(0, 2), `JOB: ${op.title}`, `OWNER: ${op.owner}`, ...op.watches.slice(0, 3).map((item) => `- ${item}`), `ALERT: ${op.alertRules[0] ?? "NONE"}`];
+  }
+
+  function walkNoticeLines(roomId?: string) {
+    const op = roomId ? gen2RoomOperations[roomId] : undefined;
+    if (!op) return ["NOTICES", "NO NEW NOTICES"];
+    return ["NOTICES", op.title, `OWNER ${op.owner}`, `REPORTS TO ${op.reportTo}`];
+  }
+
+  function walkCaption(x: number, y: number) {
+    const npc = npcsRef.current.find((item) => item.x === x && item.y === y);
+    if (npc) {
+      const profile = staff[npc.id] ?? defaultGrowOpsStaff(npc);
+      return `${profile.name.toUpperCase()}, ${profile.title}. DOING: ${npcDoingLabel(npc)}. MOOD: ${moodText(npc, profile)}. NEED: ${npcNeedHint(npc)}.`;
+    }
+    const prop = walkPropAt(x, y);
+    if (!prop) return "";
+    if (prop.kind === "terminal" && prop.room === "rd2") {
+      const model = modelTerminalFor(prop, ollamaModels);
+      return `${model?.title ?? "MODEL TERMINAL"}: MODEL ${model?.model ?? "UNKNOWN"}. ${model?.detail ?? ""}`.trim();
+    }
+    const card = walkSelectionFor(prop);
+    return `${card.title}: ${card.lines.slice(0, 6).join(" / ")}`;
+  }
+
+  function walkDescribe(x: number, y: number) {
+    const npc = npcsRef.current.find((item) => item.x === x && item.y === y);
+    if (npc) return `TALK TO ${(staff[npc.id]?.name ?? humanizeNpcId(npc.id)).toUpperCase()}`;
+    const prop = walkPropAt(x, y);
+    if (!prop) return "";
+    if (prop.kind === "terminal" && prop.room === "rd2") return "USE MODEL TERMINAL";
+    if (isPlant(prop)) return "CHECK PLANT";
+    return `CHECK ${prop.kind.replace(/([A-Z])/g, " $1").toUpperCase()}`;
+  }
+
+  walkHostRef.current = {
+    walkable,
+    getNpcs: () => {
+      const cache = walkNpcCacheRef.current;
+      if (cache && cache.src === npcs && cache.staff === staff) return cache.out;
+      const out = npcs.map((npc): WalkNpc => ({
+        id: npc.id,
+        x: npc.x,
+        y: npc.y,
+        dir: npc.dir,
+        stepFrame: npc.stepFrame,
+        role: npc.role,
+        hatColor: staff[npc.id]?.hatColor ?? roleColor(npc.role),
+        shoeColor: staff[npc.id]?.shoeColor ?? (npc.role === "boss" ? "#8a5a2b" : roleColor(npc.role)),
+      }));
+      walkNpcCacheRef.current = { src: npcs, staff, out };
+      return out;
+    },
+    plantLook: (prop) => walkPlantLook(prop, life, roomVitals),
+    caption: walkCaption,
+    clock: () => {
+      const date = new Date();
+      return { hours: date.getHours(), minutes: date.getMinutes(), text: gen2FormatClock12(date.getHours() * 60 + date.getMinutes()) };
+    },
+    readout: (prop) => {
+      if (prop.kind === "monitor") {
+        const view = monitorViewFor(prop, roomVitals);
+        return [view.title, ...view.lines];
+      }
+      if (prop.kind === "whiteboard") return [`${roomLabel(prop.room ?? "")} BOARD`, ...walkWhiteboardLines(prop.room)];
+      if (prop.kind === "terminal") {
+        const model = prop.room === "rd2" ? modelTerminalFor(prop, ollamaModels) : undefined;
+        if (model) return [model.title, `MODEL ${model.model}`, model.detail];
+      }
+      const card = walkSelectionFor(prop);
+      return [card.title, ...card.lines];
+    },
+    signLines: (roomId) => [(gen2Rooms.find((room) => room.id === roomId)?.label ?? roomId).toUpperCase(), ...walkVitalLines(roomId).slice(0, 2)],
+    noticeLines: (roomId) => walkNoticeLines(roomId),
+    interact: walkInteract,
+    describe: walkDescribe,
+    back: walkBack,
+    inputBlocked: () => !!terminalSession || !!dialog || growOpsOpen,
+  };
+
   function openRoom(room: Gen2Room) {
+    if (walk.active) {
+      setSelection(roomSelection(room, roomVitals));
+      setContextMenu(undefined);
+      return;
+    }
     setFocusedRoomId(room.id);
     setSelection(roomSelection(room, roomVitals));
     setContextMenu(undefined);
@@ -747,6 +926,7 @@ export function Gen2FacilityDashboard() {
             <span>CLOCK {clockText}</span>
             {life ? <span title="Facility crop lifecycle clock">LIFE {life.snap.simLabel} X{life.snap.scale}</span> : null}
             <button type="button" className={lifecycleOpen ? "is-active" : ""} onClick={() => setLifecycleOpen((open) => !open)}>LIFECYCLE</button>
+            <button type="button" className={`walk-enter ${walk.active ? "is-active" : ""}`} onClick={(event) => { event.currentTarget.blur(); if (walk.active) exitFacility(); else enterFacility(); }} title="Walk around the live facility as a visitor (arrows / WASD, V switches first person)">{walk.active ? "EXIT FACILITY" : "ENTER FACILITY"}</button>
             <span>{gen2Rooms.length} ROOMS</span>
             <span>{npcs.length} STAFF</span>
             <span>{Object.keys(gen2RoomOperations).length} JOBS</span>
@@ -754,9 +934,9 @@ export function Gen2FacilityDashboard() {
           </div>
         </div>
 
-        <div ref={viewportRef} className={`gen2-viewport ${focusedRoom ? "is-detail" : ""}`} onClick={() => setContextMenu(undefined)} onContextMenu={(event) => event.preventDefault()}>
-          {!focusedRoom ? (
-            <div className="gen2-board" style={{ width: worldWidth, height: worldHeight, transform: `translate(${fitPan.x}px, ${fitPan.y}px) scale(${fitZoom})` }}>
+        <div ref={viewportRef} style={clockHandStyle()} className={`gen2-viewport ${focusedRoom && !walk.active ? "is-detail" : ""} ${walk.active ? "is-walk" : ""} ${walk.active && walk.view === "fp" ? "is-walk-fp" : ""} ${walk.active && walk.full ? "is-walk-full" : ""}`} onClick={() => setContextMenu(undefined)} onContextMenu={(event) => event.preventDefault()}>
+          {!focusedRoom || walk.active ? (
+            <div ref={boardRef} className="gen2-board" style={{ width: worldWidth, height: worldHeight, transform: overviewTransform }}>
               {gen2Hallways.map((hall, index) => (
                 <HallView key={`hall-${index}`} hall={hall} />
               ))}
@@ -771,10 +951,40 @@ export function Gen2FacilityDashboard() {
               ))}
               <LifeBubbles />
               <RoutePathOverlay npc={npcs.find((item) => item.id === highlightRouteId)} />
+              {walk.active ? (
+                <div ref={walkPlayerRef} className="gen2-npc-wrap walk-player" aria-hidden="true" style={{ left: walk.spawn.x * GEN2_TILE + 1, top: walk.spawn.y * GEN2_TILE - 8 }}>
+                  <span ref={walkSpriteRef} className={`gen2-npc role-visitor face-${walk.spawn.dir} step-0`} />
+                </div>
+              ) : null}
             </div>
           ) : (
             <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} activityState={activityState} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
           )}
+          {walk.active ? (
+            <WalkMode
+              hostRef={walkHostRef}
+              npcs={npcs}
+              view={walk.view}
+              full={walk.full}
+              pad={walk.pad}
+              viewportRef={viewportRef}
+              boardRef={boardRef}
+              playerRef={walkPlayerRef}
+              spriteRef={walkSpriteRef}
+              overviewTransform={overviewTransform}
+              playerTile={playerTileRef}
+              spawn={walk.spawn}
+              onViewChange={(view) => setWalk((current) => (current.view === view ? current : { ...current, view }))}
+              onFullChange={(full) => setWalk((current) => ({ ...current, full }))}
+              onPadChange={(pad) => setWalk((current) => ({ ...current, pad }))}
+              onExit={exitFacility}
+            />
+          ) : null}
+          {walk.active && selection ? (
+            <div className="walk-card" onClick={(event) => event.stopPropagation()}>
+              <SelectionCard selection={selection} />
+            </div>
+          ) : null}
           {contextMenu ? <ContextMenu menu={contextMenu} onClose={() => setContextMenu(undefined)} /> : null}
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
@@ -1263,9 +1473,9 @@ function GrowOpsPanel({
   }
 
   const schedule = draft.schedule ?? gen2DefaultSchedule(draft.id, draft.department);
-  const [clockText, setClockText] = useState(() => gen2FormatClock(clockMinuteNow()));
+  const [clockText, setClockText] = useState(() => gen2FormatClock12(clockMinuteNow()));
   useEffect(() => {
-    const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
+    const interval = window.setInterval(() => setClockText(gen2FormatClock12(clockMinuteNow())), 15000);
     return () => window.clearInterval(interval);
   }, []);
   function setSchedule(next: Gen2Schedule) {
@@ -3550,6 +3760,72 @@ function spriteDialogFor(npc: LiveNpc, staff: GrowOpsStaff, incidentPhase: numbe
 
 function roomAt(x: number, y: number) {
   return gen2Rooms.find((room) => x >= room.x && x < room.x + room.w && y >= room.y && y < room.y + room.h);
+}
+
+// ---------------------------------------------------------------------------
+// Facility walk mode helpers (see src/walk/)
+// ---------------------------------------------------------------------------
+
+type WalkState = { active: boolean; view: WalkView; full: boolean; pad: boolean | null; spawn: { x: number; y: number; dir: WalkDir } };
+
+/** Rotation of the wall-clock hands in the top-down view (kept in step with the real time). */
+function clockHandStyle(): CSSProperties {
+  const date = new Date();
+  const minutes = date.getMinutes() + date.getSeconds() / 60;
+  return { "--clock-min": `${minutes * 6}deg`, "--clock-hour": `${(date.getHours() % 12) * 30 + minutes * 0.5}deg` } as CSSProperties;
+}
+
+/** Floor dressing the player's A button should look through. */
+const WALK_IGNORED_PROPS = new Set<Gen2Prop["kind"]>(["decal", "mat", "rug", "plantTag"]);
+
+/** The NPC walkable set minus the player's tile, so staff route around the visitor (cached per player tile). */
+function walkableAvoiding(walkable: Set<string>, player: { x: number; y: number } | null, cache: { current: { key: string; set: Set<string> } | undefined }) {
+  if (!player) return walkable;
+  const key = tileKey(player.x, player.y);
+  if (cache.current?.key !== key) {
+    const set = new Set(walkable);
+    set.delete(key);
+    cache.current = { key, set };
+  }
+  return cache.current.set;
+}
+
+/** First free tile just inside the screening room's entrance (left door), falling back to the nearest free interior tile. */
+function pickWalkSpawn(npcs: LiveNpc[], walkable: Set<string>): { x: number; y: number; dir: WalkDir } {
+  const room = gen2Rooms.find((item) => item.id === "screen") ?? gen2Rooms[0];
+  const occupied = new Set(npcs.map((npc) => tileKey(npc.x, npc.y)));
+  const free = (x: number, y: number) => walkable.has(tileKey(x, y)) && !occupied.has(tileKey(x, y));
+  const preferred = [[1, 5], [1, 6], [2, 5], [2, 6], [3, 5], [3, 6]];
+  for (const [dx, dy] of preferred) if (free(room.x + dx, room.y + dy)) return { x: room.x + dx, y: room.y + dy, dir: "right" };
+  const anchor = { x: room.x + 1, y: room.y + 5 };
+  let best: { x: number; y: number } | undefined;
+  let bestDistance = Infinity;
+  for (let y = room.y + 1; y < room.y + room.h - 1; y += 1) {
+    for (let x = room.x + 1; x < room.x + room.w - 1; x += 1) {
+      const distance = Math.abs(x - anchor.x) + Math.abs(y - anchor.y);
+      if (distance < bestDistance && free(x, y)) {
+        best = { x, y };
+        bestDistance = distance;
+      }
+    }
+  }
+  const spot = best ?? nearestWalkableGoal(anchor, walkable, 18) ?? anchor;
+  return { x: spot.x, y: spot.y, dir: "right" };
+}
+
+const WALK_STAGE_COLUMN: Record<string, number> = { clone: 0, veg: 1, flower: 2, ripe: 3 };
+
+/** Which plants.png cell the first-person view draws for a plant prop (mirrors the CSS classes PropView applies). */
+function walkPlantLook(prop: Gen2Prop, life: LifeState | undefined, roomVitals: RoomVitals): WalkPlantLook {
+  if (prop.kind === "cutPlant") return { col: 0, row: 3 };
+  const lifeProp = lifePropState(prop, life, Date.now());
+  if (lifeProp?.ownsLook && !lifeProp.stage) return "pot";
+  const stage = lifeProp?.stage ?? plantStage(prop);
+  const classes = lifeProp?.classes ?? "";
+  const owns = !!lifeProp?.ownsLook;
+  const offline = classes.includes("is-device-offline") || (!owns && !!prop.room && roomVitals[prop.room]?.online === false);
+  const stressed = classes.includes("is-stressed-plant") || (!owns && isStressedPlant(prop, roomVitals));
+  return { col: WALK_STAGE_COLUMN[stage] ?? 1, row: offline ? 2 : stressed ? 1 : 0 };
 }
 
 function staffSelection(npc: LiveNpc, staff?: GrowOpsStaff): Selection {

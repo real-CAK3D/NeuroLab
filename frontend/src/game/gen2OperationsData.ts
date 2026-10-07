@@ -841,6 +841,13 @@ export function gen2FormatClock(minutes: number): string {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
+/** 12-hour clock text such as "7:42 PM" (display only; time inputs keep gen2FormatClock's 24-hour value). */
+export function gen2FormatClock12(minutes: number): string {
+  const total = ((Math.floor(minutes) % 1440) + 1440) % 1440;
+  const hour = Math.floor(total / 60);
+  return `${hour % 12 === 0 ? 12 : hour % 12}:${String(total % 60).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
+
 export function gen2ParseClock(value: string, fallback: number): number {
   const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
   if (!match) return fallback;
