@@ -1,0 +1,422 @@
+/* ------------------------------------------------------------------
+   Facility walk mode: close top-down follow camera, first-person canvas,
+   HUD and the on-screen touch pad. Everything is CSS / canvas, no new art.
+   ------------------------------------------------------------------ */
+
+.gb-stats button.walk-enter {
+  background: #48b060;
+  color: #11151d;
+}
+
+.gb-stats button.walk-enter.is-active,
+.gb-stats button.walk-enter:hover,
+.gb-stats button.walk-enter:focus {
+  background: #f2cf3f;
+}
+
+/* ---- viewport states ---- */
+.gen2-viewport.is-walk {
+  touch-action: none;
+  cursor: default;
+  background: #0d141b;
+}
+
+.gen2-viewport.is-walk-fp .gen2-board {
+  display: none;
+}
+
+.gen2-viewport.is-walk-full {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  border-width: 0;
+}
+
+/* the follow camera: tween the board transform in step with the player's step */
+.gen2-board.walk-cam {
+  transition: transform 175ms linear;
+}
+
+/* ---- the player sprite (a visitor: different sheet column, blue cap, yellow shoes) ---- */
+.gen2-npc-wrap.walk-player {
+  z-index: 95;
+  cursor: default;
+  pointer-events: none;
+  transition: none;
+}
+
+.gen2-npc-wrap.walk-player.walk-player-smooth {
+  transition: left 175ms linear, top 175ms linear;
+}
+
+.walk-player::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: -5px;
+  width: 0;
+  height: 0;
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-top: 4px solid #f2cf3f;
+  filter: drop-shadow(0 1px 0 #11151d);
+  animation: walkMarker 0.8s steps(2, end) infinite;
+}
+
+/* Same shared worker body as the staff (sheet column 0); only the hat / shoe colour-code differs: gold cap, white shoes. */
+.role-visitor {
+  --sheet-x: 0;
+  --hat-color: #f2cf3f;
+  --shoe-color: #f4efe2;
+}
+
+@keyframes walkMarker {
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+/* ---- overlay layer ---- */
+.walk-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 110;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-transform: uppercase;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.walk-layer > * {
+  pointer-events: auto;
+}
+
+.walk-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+  background: #0d141b;
+  cursor: pointer;
+}
+
+.walk-canvas[hidden] {
+  display: none;
+}
+
+.walk-reticle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  pointer-events: none;
+}
+
+.walk-reticle::before,
+.walk-reticle::after {
+  content: "";
+  position: absolute;
+  background: #f6eed8;
+  box-shadow: 0 0 0 1px #11151d;
+}
+
+.walk-reticle::before {
+  left: 4px;
+  top: 0;
+  width: 2px;
+  height: 10px;
+  clip-path: polygon(0 0, 100% 0, 100% 35%, 0 35%, 0 65%, 100% 65%, 100% 100%, 0 100%);
+}
+
+.walk-reticle::after {
+  left: 0;
+  top: 4px;
+  width: 10px;
+  height: 2px;
+  clip-path: polygon(0 0, 35% 0, 35% 100%, 0 100%, 65% 0, 100% 0, 100% 100%, 65% 100%);
+}
+
+.walk-hud {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: grid;
+  gap: 3px;
+  max-width: min(60%, 360px);
+  pointer-events: none;
+}
+
+.walk-layer .walk-hud > div {
+  border: 3px solid #11151d;
+  background: #f6eed8;
+  box-shadow: inset -3px -3px 0 #9fb0b1;
+  color: #11151d;
+  font-size: 0.68rem;
+  line-height: 1.15;
+  padding: 3px 7px;
+  width: fit-content;
+}
+
+.walk-hud-room {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.walk-hud-hint {
+  font-size: 0.58rem !important;
+  background: #d8e8df !important;
+}
+
+.walk-hud-note {
+  background: #f2cf3f !important;
+}
+
+.walk-hud-note.is-facing {
+  background: #8ec7d7 !important;
+}
+
+.walk-toolbar {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.walk-toolbar button {
+  border: 3px solid #11151d;
+  background: #f2cf3f;
+  box-shadow: inset -2px -2px 0 rgba(17, 21, 29, 0.25);
+  color: #11151d;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.64rem;
+  min-height: 30px;
+  padding: 2px 8px;
+  touch-action: manipulation;
+}
+
+.walk-toolbar button.is-active {
+  background: #8ec7d7;
+}
+
+.walk-toolbar button.is-exit {
+  background: #d9483d;
+  color: #fff7dc;
+}
+
+.walk-toolbar button:hover,
+.walk-toolbar button:focus-visible {
+  filter: brightness(1.12);
+  outline: 0;
+}
+
+/* selection card (staff / prop / plant stats) while walking */
+.walk-card {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  z-index: 130;
+  width: min(420px, 46%);
+  max-height: 44%;
+  overflow: auto;
+  transform: translateX(-50%);
+  border: 4px solid #11151d;
+  background: #f6eed8;
+  box-shadow: inset -3px -3px 0 #9fb0b1;
+  color: #11151d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.walk-card .gen2-selection-card {
+  border: 0;
+  min-height: 0;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.64rem;
+  line-height: 1.25;
+}
+
+.walk-card .gen2-selection-card:focus {
+  outline: 0;
+}
+
+/* ---- touch pad ---- */
+.walk-pad {
+  position: absolute;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
+.walk-dpad {
+  left: max(14px, env(safe-area-inset-left));
+  width: 180px;
+  height: 180px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 0;
+}
+
+.walk-actions {
+  right: max(14px, env(safe-area-inset-right));
+  width: 190px;
+  height: 130px;
+}
+
+.pad-btn {
+  appearance: none;
+  border: 4px solid #11151d;
+  background: #4b5155;
+  color: #f6eed8;
+  box-shadow: inset -4px -4px 0 rgba(0, 0, 0, 0.35), inset 3px 3px 0 rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 0;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pad-btn.is-down,
+.pad-btn:active {
+  background: #8ec7d7;
+  color: #11151d;
+  box-shadow: inset 4px 4px 0 rgba(0, 0, 0, 0.3);
+}
+
+.pad-up {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.pad-left {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.pad-right {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.pad-down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.pad-hub {
+  grid-column: 2;
+  grid-row: 2;
+  background: #393c3b;
+  border: 4px solid #11151d;
+  border-width: 0;
+  pointer-events: none;
+}
+
+.pad-up::after,
+.pad-down::after,
+.pad-left::after,
+.pad-right::after {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  margin: auto;
+  border: 11px solid transparent;
+}
+
+.pad-up::after {
+  border-bottom: 16px solid currentColor;
+  border-top-width: 0;
+}
+
+.pad-down::after {
+  border-top: 16px solid currentColor;
+  border-bottom-width: 0;
+}
+
+.pad-left::after {
+  border-right: 16px solid currentColor;
+  border-left-width: 0;
+}
+
+.pad-right::after {
+  border-left: 16px solid currentColor;
+  border-right-width: 0;
+}
+
+.pad-round {
+  position: absolute;
+  width: 78px;
+  height: 78px;
+  border-radius: 50%;
+  font-size: 1.5rem;
+  background: #d9483d;
+}
+
+.pad-a {
+  right: 0;
+  top: 0;
+}
+
+.pad-b {
+  left: 0;
+  bottom: 0;
+  background: #f2cf3f;
+  color: #11151d;
+}
+
+/* ---- phones in landscape: bigger touch targets, compact HUD ---- */
+@media (max-height: 520px) {
+  .walk-dpad {
+    width: 168px;
+    height: 168px;
+  }
+
+  .walk-hud-hint {
+    display: none;
+  }
+
+  .walk-card {
+    width: min(360px, 40%);
+    max-height: 40%;
+    bottom: 6px;
+  }
+
+  .walk-card .gen2-selection-card {
+    font-size: 0.56rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .walk-dpad {
+    width: 150px;
+    height: 150px;
+  }
+
+  .pad-round {
+    width: 66px;
+    height: 66px;
+  }
+
+  .walk-actions {
+    width: 150px;
+    height: 120px;
+  }
+
+  .walk-card {
+    width: calc(100% - 20px);
+    bottom: 174px;
+  }
+}
