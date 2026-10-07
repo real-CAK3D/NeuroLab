@@ -278,6 +278,67 @@ export async function undoActivityStateSnapshot(): Promise<ActivityStateResponse
   return fetchJson(`${backendUrl}/api/activity-state/undo`, { method: "POST" });
 }
 
+// ---------------------------------------------------------------------------
+// Crop lifecycle (GET /api/lifecycle, see backend/src/services/lifecycle.ts)
+// ---------------------------------------------------------------------------
+
+export type LifecyclePlantStage = "clone" | "veg" | "flower" | "ripe";
+
+export type LifecycleGrowRoom = {
+  phase: string;
+  label: string;
+  progress: number;
+  day: number;
+  cycleDays: number;
+  plantStage: LifecyclePlantStage | null;
+  growth: number;
+  device: { id: string; online: boolean } | null;
+  cycles: number;
+  batch: { code: string; units: number; stress: number } | null;
+};
+
+export type LifecycleBatchRef = { code: string; stage: string; kind?: string; progress?: number; units: number; quality?: number };
+export type LifecycleDryRoom = { online: boolean; capacity: number; batches: LifecycleBatchRef[] };
+export type LifecycleStageRoom = { batches: LifecycleBatchRef[] };
+export type LifecycleMother = { code: string; source: string; ageDays: number; progress: number };
+export type LifecycleWarehouseBatch = { code: string; kind: string; units: number; quality: number };
+
+export type LifecycleLogEntry = { simAt: number; realAt?: string; kind: string; room: string | null; batch: string | null; message: string };
+export type LifecycleSample = { simAt: number; room: string; batch: string | null; kind: string; result: string; note?: string | null };
+export type LifecycleSale = { simAt: number; orderCode: string; sku: string; units: number; batch: string | null };
+export type LifecycleBatchRow = { code: string; kind: string; stage: string; room: string | null; units: number; quality: number; stress: number };
+
+export type LifecycleSnapshot = {
+  scale: number;
+  simLabel: string;
+  simDays: number;
+  durationsDays: Record<string, number>;
+  rooms: {
+    grow1: LifecycleGrowRoom;
+    grow2: LifecycleGrowRoom;
+    grow3: LifecycleGrowRoom;
+    grow4: LifecycleGrowRoom;
+    soil: LifecycleDryRoom;
+    vmCreations: LifecycleDryRoom;
+    trim: LifecycleStageRoom;
+    pack: LifecycleStageRoom;
+    extract: LifecycleStageRoom;
+    dock: LifecycleStageRoom;
+    mother: { online: boolean; lifeDays: number; mothers: LifecycleMother[] };
+    clone: { online: boolean; cuttingsInTray: number };
+    warehouse: { batches: LifecycleWarehouseBatch[]; inventory: { flower: number; extract: number } };
+  };
+  inventory: { flower: number; extract: number };
+  log: LifecycleLogEntry[];
+  samples: LifecycleSample[];
+  sales: LifecycleSale[];
+  batches: LifecycleBatchRow[];
+};
+
+export async function getLifecycle(): Promise<LifecycleSnapshot> {
+  return fetchJson(`${backendUrl}/api/lifecycle`);
+}
+
 // When the server sets NEUROLAB_WRITE_TOKEN, save it once in this browser: localStorage.setItem("neurolab.token", "<token>").
 function writeToken() {
   try {

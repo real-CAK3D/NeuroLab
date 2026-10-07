@@ -1,0 +1,418 @@
+/* ------------------------------------------------------------------
+   Crop lifecycle visuals: plant growth, sterile rooms, dry/cure racks, crates, worker tools and the LIFECYCLE panel.
+   Loaded after sceneSprites.css. Everything is CSS-drawn in the existing palette; no new art is shipped.
+   ------------------------------------------------------------------ */
+
+/* plant growth: the foliage sprite scales from the pot (--grow), flipped plants keep their mirror */
+.gen2-prop.has-plant::before {
+  transform: scale(var(--grow, 1));
+  transform-origin: 50% 88%;
+}
+
+.has-plant.plant-flip::before,
+.prop-plantBed.has-plant.plant-flip.is-harvesting::before {
+  transform: scaleX(-1) scale(var(--grow, 1));
+}
+
+/* empty pots and trays: only the pot sprite stays */
+.gen2-prop.life-open::before {
+  display: none;
+}
+
+.gen2-prop.has-plant.life-soil::after {
+  display: block;
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 5px;
+  border-radius: 50% 50% 0 0;
+  background: #6b4426;
+  box-shadow: inset 0 2px 0 #8b6138, inset 3px 1px 0 #4a2f1b;
+}
+
+.gen2-prop.life-dim {
+  opacity: 0.6;
+  filter: grayscale(0.7) brightness(0.85);
+}
+
+.gen2-prop.life-planted {
+  animation: lifePop 0.5s steps(3, end) 1;
+}
+
+.gen2-prop.life-cutting::before {
+  animation: lifeCut 0.4s steps(2, end) infinite;
+}
+
+.gen2-prop.life-cutting {
+  filter: brightness(1.12);
+}
+
+.gen2-prop.life-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* sterile pots: white wash, sparkle while someone sprays */
+.gen2-prop.has-plant.life-sterile {
+  filter: brightness(1.45) saturate(0.25);
+}
+
+.gen2-prop.has-plant.life-sterile::after {
+  display: block;
+  left: -2px;
+  top: -8px;
+  width: 20px;
+  height: 18px;
+  background:
+    radial-gradient(circle at 4px 12px, #ffffff 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 12px 5px, #e0f6ff 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 17px 13px, #ffffff 0 1px, transparent 2px);
+  animation: lifeTwinkle 1.8s steps(2, end) infinite;
+  pointer-events: none;
+}
+
+.gen2-prop.has-plant.life-sterile.life-spraying::after {
+  animation: lifeMist 0.9s steps(4, end) infinite;
+}
+
+/* room-wide sterile wash and spray mist (an overlay inside the room frame) */
+.life-wash {
+  position: absolute;
+  inset: 0;
+  z-index: 34;
+  pointer-events: none;
+  overflow: hidden;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(196, 238, 255, 0.3));
+  box-shadow: inset 0 0 0 3px rgba(200, 240, 255, 0.85);
+}
+
+.life-wash.is-sterilizing,
+.life-wash.is-cleaning {
+  animation: lifeWash 1.6s ease-in-out infinite alternate;
+}
+
+.life-wash.is-cleaning {
+  background: linear-gradient(135deg, rgba(210, 236, 255, 0.34), rgba(255, 255, 255, 0.22));
+}
+
+.life-wash.is-sterile {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(210, 244, 255, 0.22));
+}
+
+.life-wash i {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: radial-gradient(circle, #ffffff 0 2px, transparent 3.5px);
+  animation: lifeTwinkle 1.4s steps(2, end) infinite;
+}
+
+.life-wash.is-sterilizing b,
+.life-wash.is-cleaning b {
+  position: absolute;
+  top: 36%;
+  left: -20%;
+  width: 40%;
+  height: 26%;
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.85) 0 30%, transparent 70%);
+  animation: lifeDrift 3.2s linear infinite;
+}
+
+.life-wash.is-sterilizing b:nth-of-type(2),
+.life-wash.is-cleaning b:nth-of-type(2) {
+  top: 12%;
+  animation-delay: -1.6s;
+}
+
+.gen2-room.is-room-sterile,
+.gen2-detail-room.is-room-sterile {
+  filter: brightness(1.08) saturate(0.82);
+}
+
+/* dry / cure racks: batch tag and progress bar */
+.gen2-prop[data-tag]::after {
+  content: attr(data-tag);
+  display: block;
+  left: 50%;
+  top: -9px;
+  bottom: auto;
+  width: auto;
+  height: auto;
+  transform: translateX(-50%);
+  border: 1px solid #11151d;
+  background: #fff7dc;
+  color: #11151d;
+  box-shadow: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 5px;
+  line-height: 1;
+  padding: 1px 2px;
+  white-space: nowrap;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.prop-dryRack.life-rack {
+  background-color: #9fb0b1;
+}
+
+.prop-dryRack.life-occupied {
+  background-color: #b9c9c5;
+}
+
+.prop-dryRack.life-occupied::before {
+  left: 3px;
+  right: 3px;
+  bottom: 2px;
+  height: 3px;
+  background: linear-gradient(90deg, #83c45d var(--prog, 0%), #11151d var(--prog, 0%));
+  border: 1px solid #11151d;
+}
+
+.prop-dryRack.life-curing {
+  background-color: #d8c79a;
+}
+
+.prop-cutPlant.life-cure {
+  width: 15px !important;
+  height: 15px !important;
+}
+
+.prop-cutPlant.life-cure::before {
+  --px: 0px;
+  --py: -84px;
+  filter: sepia(0.75) saturate(0.8) brightness(0.8);
+}
+
+.prop-cutPlant.life-cure::after {
+  display: block;
+  left: -4px;
+  top: 3px;
+  width: 7px;
+  height: 9px;
+  border: 1px solid #11151d;
+  background: linear-gradient(#cfe9d6 0 25%, #4f9b4f 25%);
+  box-shadow: 8px 0 0 -0px #c8e6d0, 8px 0 0 1px #11151d, 16px 0 0 #c8e6d0, 16px 0 0 1px #11151d;
+}
+
+/* crates and shelves that hold real batches */
+.gen2-prop.life-crate.life-empty,
+.gen2-prop.life-shelf.life-empty {
+  opacity: 0.5;
+  filter: grayscale(0.55);
+}
+
+.gen2-prop.life-crate.life-filled {
+  box-shadow: inset 0 4px 0 #f2cf89, inset 0 -4px 0 #80592f, 0 0 0 1px #83c45d;
+}
+
+.gen2-prop.life-shelf.life-filled {
+  box-shadow: inset 0 -5px 0 #c09252, inset 4px 0 0 #83c45d;
+}
+
+.gen2-prop.life-kind-extract {
+  filter: hue-rotate(150deg) saturate(1.2);
+}
+
+.gen2-prop.life-working {
+  animation: harvestWork 0.75s steps(2, end) infinite;
+}
+
+/* worker tools and cargo */
+.cargo-spray {
+  width: 5px;
+  height: 9px;
+  top: 7px;
+  background: #8ec7d7;
+  box-shadow: inset 0 3px 0 #fff2d4;
+}
+
+.cargo-mop {
+  width: 3px;
+  height: 11px;
+  top: 5px;
+  background: #c09252;
+  box-shadow: 0 8px 0 2px #fff2d4;
+}
+
+.npc-fx {
+  position: absolute;
+  left: 11px;
+  top: 3px;
+  z-index: 3;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+}
+
+.npc-fx.fx-spray {
+  background:
+    radial-gradient(circle at 2px 6px, #ffffff 0 1px, transparent 2px),
+    radial-gradient(circle at 6px 3px, #e0f6ff 0 1px, transparent 2px),
+    radial-gradient(circle at 8px 8px, #ffffff 0 1px, transparent 2px);
+  animation: lifeMist 0.7s steps(3, end) infinite;
+}
+
+.npc-fx.fx-mop {
+  top: 10px;
+  left: 2px;
+  width: 12px;
+  height: 4px;
+  background: #dff3ff;
+  border: 1px solid #8ec7d7;
+  animation: harvestWork 0.5s steps(2, end) infinite;
+}
+
+.npc-fx.fx-work {
+  background: radial-gradient(circle at 5px 5px, #fff2d4 0 1.5px, transparent 2.5px);
+  animation: lifeTwinkle 0.6s steps(2, end) infinite;
+}
+
+.gen2-bubble.life-bubble {
+  z-index: 210;
+  background: #fff7dc;
+  font-size: 5px;
+}
+
+/* LIFECYCLE panel (Game Boy style, same family as the Activity Lab drawer) */
+.lifecycle-panel {
+  position: absolute;
+  left: 18px;
+  top: 18px;
+  z-index: 125;
+  width: min(380px, calc(100% - 36px));
+  max-height: calc(100% - 36px);
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  border: 4px solid #11151d;
+  background: #e8f0df;
+  color: #11151d;
+  padding: 10px;
+  box-shadow: 0 10px 0 rgba(17, 21, 29, 0.36), inset 0 0 0 2px #fff2d4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+}
+
+.lifecycle-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 8px;
+}
+
+.lifecycle-panel header div {
+  display: grid;
+  gap: 2px;
+}
+
+.lifecycle-panel header strong {
+  font-size: 0.9rem;
+}
+
+.lifecycle-panel button {
+  border: 2px solid #11151d;
+  background: #f2cf3f;
+  color: #11151d;
+  font: inherit;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.lifecycle-panel button:hover {
+  background: #8ec7d7;
+}
+
+.lifecycle-clock {
+  border: 2px solid #11151d;
+  background: #1b2a1f;
+  color: #b9f08c;
+  padding: 4px 6px;
+  text-shadow: 0 0 4px rgba(131, 196, 93, 0.6);
+}
+
+.lifecycle-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.lifecycle-grid span {
+  display: grid;
+  border: 2px solid #11151d;
+  background: #fff7dc;
+  padding: 3px 4px;
+}
+
+.lifecycle-grid b {
+  font-size: 0.95rem;
+}
+
+.lifecycle-grid em {
+  font-style: normal;
+  opacity: 0.75;
+}
+
+.lifecycle-panel h4 {
+  margin: 2px 0 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+}
+
+.lifecycle-log {
+  display: grid;
+  gap: 2px;
+  border: 2px solid #11151d;
+  background: #fff7dc;
+  padding: 4px;
+  text-transform: none;
+}
+
+.lifecycle-log span {
+  line-height: 1.25;
+}
+
+.lifecycle-log span.is-sale { color: #7a4f00; }
+.lifecycle-log span.is-sample { color: #1f5f78; }
+.lifecycle-log span.is-loss { color: #a8322a; }
+
+@keyframes lifePop {
+  0% { transform: translateY(5px); opacity: 0.3; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes lifeCut {
+  50% { transform: scale(var(--grow, 1)) rotate(5deg) translateY(2px); }
+}
+
+@keyframes lifeTwinkle {
+  50% { opacity: 0.25; transform: scale(0.75); }
+}
+
+@keyframes lifeMist {
+  0% { opacity: 1; transform: translateY(2px); }
+  100% { opacity: 0; transform: translateY(-5px); }
+}
+
+@keyframes lifeWash {
+  0% { opacity: 0.55; }
+  100% { opacity: 1; }
+}
+
+@keyframes lifeDrift {
+  0% { transform: translateX(0); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateX(350%); opacity: 0; }
+}
+
+/* room frame: rooms with device telemetry get a third (lifecycle) line, drawn bottom right above the props */
+.gen2-room-vitals.has-life {
+  left: auto;
+  right: 4px;
+  z-index: 45;
+}
+
+.gen2-room-vitals .vital-device {
+  opacity: 0.7;
+}

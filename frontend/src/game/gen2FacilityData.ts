@@ -374,7 +374,7 @@ const vmRoomProps: Gen2Prop[] = [
   { kind: "monitor", x: 12, y: 30, room: "vmCreations" },
   { kind: "rack", x: 15, y: 28, w: 3, h: 5, room: "vmCreations" },
   { kind: "crate", x: 16, y: 35, room: "vmCreations" },
-  { kind: "whiteboard", x: 8, y: 36, w: 6, h: 2, room: "vmCreations" },
+  { kind: "whiteboard", x: 8, y: 37, w: 6, h: 1, room: "vmCreations" },
   { kind: "terminal", x: 22, y: 28, room: "soil" },
   { kind: "terminal", x: 26, y: 28, room: "soil" },
   { kind: "monitor", x: 22, y: 30, room: "soil" },
@@ -382,7 +382,12 @@ const vmRoomProps: Gen2Prop[] = [
   { kind: "monitor", x: 26, y: 30, room: "soil" },
   { kind: "rack", x: 29, y: 28, w: 3, h: 5, room: "soil" },
   { kind: "crate", x: 30, y: 35, room: "soil" },
-  { kind: "whiteboard", x: 22, y: 36, w: 6, h: 2, room: "soil" },
+  { kind: "whiteboard", x: 22, y: 37, w: 6, h: 1, room: "soil" },
+  // Drying / curing racks: one per batch (capacity 4 per dry room), each with a hung plant bundle that the lifecycle shows or hides.
+  ...[{ room: "vmCreations", left: 7 }, { room: "soil", left: 21 }].flatMap(({ room, left }) => [
+    ...[[0, 32], [3, 32], [0, 35], [3, 35]].map(([dx, y]) => ({ kind: "dryRack" as const, x: left + dx, y, w: 3, h: 2, room })),
+    ...[[1, 32], [4, 32], [1, 35], [4, 35]].map(([dx, y]) => ({ kind: "cutPlant" as const, x: left + dx, y, room })),
+  ]),
 ];
 
 // ---------------------------------------------------------------------------

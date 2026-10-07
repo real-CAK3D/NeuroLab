@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   GEN2_H,
   GEN2_TILE,
@@ -16,6 +16,24 @@ import {
 } from "../game/gen2FacilityData";
 import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
+import { LifecyclePanel } from "./LifecyclePanel";
+import { lifecycleMockEnabled, mockLifecycleSnapshot } from "../game/lifecycleMock";
+import {
+  deriveLifeEvents,
+  isLifecycleSnapshot,
+  lifeActiveKeys,
+  lifeBatchRooms,
+  lifePropState,
+  lifeRoomPhase,
+  lifeVitals,
+  reduceLifeState,
+  type LifeBubble,
+  type LifeSelection,
+  type LifeState,
+  type PendingTask,
+  type TaskCargo,
+  type TaskStop,
+} from "../game/lifecycleLogic";
 import {
   applyActivityStateSnapshot,
   applyFacilityLayoutSnapshot,
@@ -26,6 +44,7 @@ import {
   getActivityStateSnapshot,
   getFacilityLayoutSnapshot,
   getHostStats,
+  getLifecycle,
   getOllamaModels,
   getStaffConfigSnapshot,
   undoActivityStateSnapshot,
@@ -37,6 +56,7 @@ import {
   type FacilityLayoutSnapshot,
   type FacilityLayoutRoom,
   type HostStats,
+  type LifecycleSnapshot,
   type StaffConfigSnapshot,
   type OllamaModels,
 } from "../utils/api";
@@ -102,6 +122,22 @@ type NpcSim = {
   /** Absolute minute (epoch minutes) until which the worker is on a scheduled break. */
   breakUntil: number;
   breakRetry: number;
+  /** Event-driven lifecycle job (sterilize a room, carry a batch, ...). Paused by breaks and needs, dropped at shift end. */
+  task?: NpcTask;
+};
+/** A running lifecycle job: a list of stops (see TaskStop), the current stop, and what the worker carries. */
+type NpcTask = {
+  id: string;
+  key: string;
+  label: string;
+  stops: TaskStop[];
+  idx: number;
+  stage: "pick" | "go" | "use";
+  spot?: { x: number; y: number; face?: Gen2Direction };
+  left: number;
+  waited: number;
+  timeout: number;
+  carrying?: TaskCargo;
 };
 type NpcSimContext = {
   incidentPhase: number;
@@ -114,6 +150,9 @@ type NpcSimContext = {
   minute: number;
   abs: number;
   day: number;
+  /** Lifecycle keys that are true right now ("phase:grow1:sterilizing", "stage:B-0001:trimming") and batch -> room. */
+  lifeActive: ReadonlySet<string>;
+  batchRoom: Record<string, string>;
 };
 
 type LiveNpc = Gen2Npc & {
@@ -209,6 +248,11 @@ type LiveRoomVital = Gen2RoomVital & {
   online?: boolean;
   memoryPercent?: number | null;
   deviceName?: string;
+  /** Lifecycle text for the room (kept next to the real device telemetry, never replacing it). */
+  lifePrimary?: string;
+  lifeSecondary?: string;
+  lifeDetail?: string[];
+  lifePhase?: string;
 };
 
 type RoomVitals = Record<string, LiveRoomVital>;
@@ -240,6 +284,32 @@ const SECURITY_MONITOR_VIEWS = [
   { title: "R&D TEST", rooms: ["rd2"] },
   { title: "UNASSIGNED", rooms: [] },
 ] as const;
+
+const LifeContext = createContext<{ life?: LifeState; bubbles: LifeBubble[] }>({ bubbles: [] });
+const LIFE_SEEN_KEY = "gen2-lifecycle-seen-v1";
+const LIFE_MOCK = lifecycleMockEnabled();
+
+function loadLifeSeen() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(LIFE_SEEN_KEY) ?? "[]");
+    return new Set<string>(Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function persistLifeSeen(seen: Set<string>) {
+  try {
+    const list = [...seen];
+    window.localStorage.setItem(LIFE_SEEN_KEY, JSON.stringify(list.slice(-400)));
+    if (list.length > 600) {
+      seen.clear();
+      for (const item of list.slice(-400)) seen.add(item);
+    }
+  } catch {
+    // storage unavailable: events simply are not remembered across reloads
+  }
+}
 
 export function Gen2FacilityDashboard() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -275,7 +345,17 @@ export function Gen2FacilityDashboard() {
   const walkable = useMemo(() => buildWalkable(), []);
   const focusedRoom = focusedRoomId ? gen2Rooms.find((room) => room.id === focusedRoomId) : undefined;
   const staffBattleNpc = staffBattleId ? npcs.find((npc) => npc.id === staffBattleId) : undefined;
-  const roomVitals = useMemo(() => buildLiveRoomVitals(hostStats, dockerStats, ollamaModels, facilityDevices), [hostStats, dockerStats, ollamaModels, facilityDevices]);
+  const [life, setLife] = useState<LifeState | undefined>();
+  const [lifeBubbles, setLifeBubbles] = useState<LifeBubble[]>([]);
+  const [lifecycleOpen, setLifecycleOpen] = useState(false);
+  const npcsRef = useRef<LiveNpc[]>(npcs);
+  const lifePrevRef = useRef<LifeState | undefined>(undefined);
+  const lifeIssuedRef = useRef<Set<string>>(new Set());
+  const lifeSeenRef = useRef<Set<string>>(loadLifeSeen());
+  const pendingTasksRef = useRef<PendingTask[]>([]);
+  npcsRef.current = npcs;
+  const lifeContext = useMemo(() => ({ life, bubbles: lifeBubbles }), [life, lifeBubbles]);
+  const roomVitals = useMemo(() => buildLiveRoomVitals(hostStats, dockerStats, ollamaModels, facilityDevices, life?.snap), [hostStats, dockerStats, ollamaModels, facilityDevices, life]);
   const [activityState, setActivityState] = useState<ActivityState>(() => loadPersistedActivityState(npcs));
   const previousNpcRoomsRef = useRef<Record<string, string | undefined>>(roomMapForNpcs(npcs));
   const simContextRef = useRef<NpcSimContext>(EMPTY_SIM_CONTEXT);
@@ -297,14 +377,78 @@ export function Gen2FacilityDashboard() {
     return () => window.removeEventListener("resize", fitBoard);
   }, []);
 
-  simContextRef.current = useMemo(() => buildSimContext(roomVitals, incidentPhase, staff), [roomVitals, incidentPhase, staff]);
+  simContextRef.current = useMemo(() => buildSimContext(roomVitals, incidentPhase, staff, life?.snap), [roomVitals, incidentPhase, staff, life]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      setNpcs((current) => advanceAllNpcs(current, walkable, simContextRef.current, Date.now()));
+      const now = Date.now();
+      const ctx = withClock(simContextRef.current, now);
+      const dispatched = dispatchLifeTasks(npcsRef.current, pendingTasksRef.current, ctx, now);
+      pendingTasksRef.current = dispatched.remaining;
+      for (const key of dispatched.dropped) lifeIssuedRef.current.delete(key);
+      if (LIFE_MOCK) {
+        // dev aid for ?lifecycleMock=1: window.__lifeTasks() lists running and queued jobs
+        (window as unknown as Record<string, unknown>).__lifeTasks = () => ({
+          running: npcsRef.current.filter((npc) => npc.sim?.task).map((npc) => `${npc.id}@${npc.x},${npc.y}: ${npc.sim?.task?.label} stop ${npc.sim?.task?.idx} ${npc.sim?.task?.stage} carry=${npc.sim?.task?.carrying ?? "-"}`),
+          queued: pendingTasksRef.current.map((task) => `${task.label} <- ${task.candidates.join("/")}`),
+        });
+      }
+      setNpcs((current) => advanceAllNpcs(applyTaskAssignments(current, dispatched.assignments), walkable, simContextRef.current, now));
     }, MOVEMENT_TICK_MS);
     return () => window.clearInterval(interval);
   }, [walkable]);
+
+  // Crop lifecycle feed (GET /api/lifecycle every 5 s, or the ?lifecycleMock=1 synthetic feed). Fails soft: while the
+  // endpoint is unreachable the facility keeps its demo behaviour.
+  useEffect(() => {
+    let alive = true;
+    let failures = 0;
+    const mock = lifecycleMockEnabled();
+    async function pollLifecycle() {
+      try {
+        const snap: unknown = mock ? mockLifecycleSnapshot(Date.now()) : await getLifecycle();
+        if (!alive) return;
+        if (!isLifecycleSnapshot(snap)) throw new Error("unexpected lifecycle payload");
+        failures = 0;
+        const now = Date.now();
+        setLife((current) => reduceLifeState(current, snap as LifecycleSnapshot, now, mock));
+      } catch {
+        failures += 1;
+        if (alive && failures >= 6) setLife(undefined);
+      }
+    }
+    pollLifecycle();
+    const interval = window.setInterval(pollLifecycle, mock ? 1000 : 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  // Turn snapshot changes into worker tasks and speech bubbles (see deriveLifeEvents).
+  useEffect(() => {
+    if (!life) {
+      lifePrevRef.current = undefined;
+      return;
+    }
+    const previous = lifePrevRef.current;
+    if (previous === life) return;
+    lifePrevRef.current = life;
+    const now = Date.now();
+    const events = deriveLifeEvents(previous, life, lifeIssuedRef.current, lifeSeenRef.current, now);
+    if (events.tasks.length) pendingTasksRef.current = [...pendingTasksRef.current, ...events.tasks];
+    if (events.bubbles.length) setLifeBubbles((current) => [...current.filter((bubble) => bubble.until > now), ...events.bubbles]);
+    if (events.notices.length) setIntercomNotice(`LIFECYCLE: ${events.notices[events.notices.length - 1]}`);
+    if (events.seenAdd.length) persistLifeSeen(lifeSeenRef.current);
+  }, [life]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      setLifeBubbles((current) => (current.some((bubble) => bubble.until <= now) ? current.filter((bubble) => bubble.until > now) : current));
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
@@ -591,6 +735,7 @@ export function Gen2FacilityDashboard() {
   }
 
   return (
+    <LifeContext.Provider value={lifeContext}>
     <section className="mx-auto max-w-[1430px] px-4 pb-8">
       <div className="gb-shell">
         <div className="gb-topbar">
@@ -600,6 +745,8 @@ export function Gen2FacilityDashboard() {
           </div>
           <div className="gb-stats">
             <span>CLOCK {clockText}</span>
+            {life ? <span title="Facility crop lifecycle clock">LIFE {life.snap.simLabel} X{life.snap.scale}</span> : null}
+            <button type="button" className={lifecycleOpen ? "is-active" : ""} onClick={() => setLifecycleOpen((open) => !open)}>LIFECYCLE</button>
             <span>{gen2Rooms.length} ROOMS</span>
             <span>{npcs.length} STAFF</span>
             <span>{Object.keys(gen2RoomOperations).length} JOBS</span>
@@ -614,7 +761,7 @@ export function Gen2FacilityDashboard() {
                 <HallView key={`hall-${index}`} hall={hall} />
               ))}
               {gen2Rooms.map((room) => (
-                <RoomView key={room.id} room={room} roomVitals={roomVitals} activityState={activityState} onOpen={openRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onContextMenu={openContextMenu} />
+                <RoomView key={room.id} room={room} roomVitals={roomVitals} activityState={activityState} onOpen={openRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onLifecycle={() => setLifecycleOpen(true)} onSelect={setSelection} onContextMenu={openContextMenu} />
               ))}
               {gen2Props.map((prop, index) => (
                 <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} onFacilityEditor={() => openGrowOps("facility")} />
@@ -622,6 +769,7 @@ export function Gen2FacilityDashboard() {
               {npcs.map((npc) => (
                 <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} />
               ))}
+              <LifeBubbles />
               <RoutePathOverlay npc={npcs.find((item) => item.id === highlightRouteId)} />
             </div>
           ) : (
@@ -631,6 +779,7 @@ export function Gen2FacilityDashboard() {
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
           {activityLabOpen ? <ActivityLabDrawer activityState={activityState} intercomNotice={intercomNotice} onRunControl={runActivityControl} onRunScenario={runActivityScenario} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} onClose={() => setActivityLabOpen(false)} isSavingActivity={isSavingActivity} activityHistoryCount={activityHistoryCount} /> : null}
+          {lifecycleOpen ? <LifecyclePanel life={life} onClose={() => setLifecycleOpen(false)} /> : null}
           {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} focusStaffId={growOpsFocusStaffId} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} onRestoreStaff={(nextStaff) => setStaff(Object.fromEntries(Object.entries(nextStaff).map(([id, item]) => [id, cleanGrowOpsStaff({ ...(item as GrowOpsStaff), id })])))} onPreviewRoute={(id) => { setHighlightRouteId(id); setStaffBattleId(id); }} onClearRoutePreview={() => setHighlightRouteId(undefined)} /> : null}
         </div>
 
@@ -647,6 +796,7 @@ export function Gen2FacilityDashboard() {
         </div>
       </div>
     </section>
+    </LifeContext.Provider>
   );
 }
 
@@ -1588,10 +1738,26 @@ function RoomDetail({
           {roomNpcs.map((npc) => (
             <NpcView key={`${room.id}-${npc.id}`} npc={{ ...npc, x: npc.x - room.x, y: npc.y - room.y }} originalNpc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={selectedNpcId === npc.id} onSelect={onSelect} onStaffOpen={onStaffOpen} onStaffEdit={onStaffEdit} onContextMenu={onContextMenu} detail />
           ))}
+          <LifeBubbles room={room} />
           <RoutePathOverlay npc={roomNpcs.find((item) => item.id === highlightedRouteId)} origin={{ x: room.x, y: room.y }} />
         </div>
       </div>
     </div>
+  );
+}
+
+/** Short-lived speech bubbles pinned to a spot on the floor (mother retired / promoted). */
+function LifeBubbles({ room }: { room?: Gen2Room }) {
+  const { bubbles } = useContext(LifeContext);
+  const now = Date.now();
+  return (
+    <>
+      {bubbles.filter((bubble) => bubble.until > now && (!room || bubble.room === room.id)).map((bubble) => (
+        <span key={bubble.id} className="gen2-bubble life-bubble" style={{ left: (bubble.x - (room?.x ?? 0)) * GEN2_TILE + 8, top: (bubble.y - (room?.y ?? 0)) * GEN2_TILE - 14 }}>
+          {bubble.text}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -1610,6 +1776,7 @@ function RoomView({
   onOpen,
   onGrowOps,
   onFacilityEditor,
+  onLifecycle,
   onSelect,
   onContextMenu,
 }: {
@@ -1619,6 +1786,7 @@ function RoomView({
   onOpen: (room: Gen2Room) => void;
   onGrowOps: () => void;
   onFacilityEditor: () => void;
+  onLifecycle: () => void;
   onSelect: (selection: Selection) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
 }) {
@@ -1633,6 +1801,7 @@ function RoomView({
           items: [
             { label: "Zoom room", action: () => onOpen(room) },
             { label: "Room stats", action: () => onSelect(roomSelection(room, roomVitals)) },
+            { label: "Lifecycle", action: onLifecycle },
             ...(room.id === "screen" ? [{ label: "Grow Ops", action: onGrowOps }] : []),
             { label: "Flag cleaning", action: () => onSelect(actionSelection("ROOM ACTION", [`${room.label}`, "CLEANING FLAG SET", "PRIORITY: NORMAL"])) },
             { label: "Send staff", action: () => onSelect(actionSelection("DISPATCH", [`TARGET: ${room.label}`, "AVAILABLE STAFF: AUTO", "STATUS: QUEUED"])) },
@@ -1648,14 +1817,35 @@ function RoomView({
 function RoomFrame({ room, roomVitals, activityState }: { room: Gen2Room; roomVitals: RoomVitals; activityState?: ActivityState }) {
   const vitals = roomVitals[room.id];
   const activityBadge = activityState ? activityBadgeForRoom(room.id, activityState) : undefined;
+  const washPhase = vitals?.lifePhase && ["sterilizing", "cleaning", "sterile"].includes(vitals.lifePhase) ? vitals.lifePhase : undefined;
   return (
     <>
       <div className="gen2-label">{room.label}</div>
       {activityBadge ? <div className={`activity-room-badge tone-${activityBadge.tone}`}>{activityBadge.label}</div> : null}
+      {washPhase ? (
+        <div className={`life-wash is-${washPhase}`} aria-hidden="true">
+          <i style={{ left: "12%", top: "22%" }} />
+          <i style={{ left: "46%", top: "58%", animationDelay: "-0.5s" }} />
+          <i style={{ left: "78%", top: "30%", animationDelay: "-0.9s" }} />
+          <i style={{ left: "28%", top: "74%", animationDelay: "-0.2s" }} />
+          <b />
+          <b />
+        </div>
+      ) : null}
       {vitals ? (
-        <div className={`gen2-room-vitals vitals-${vitals.status.toLowerCase()}`}>
-          <strong>{vitals.primary}</strong>
-          <span>{vitals.secondary}</span>
+        <div className={`gen2-room-vitals vitals-${vitals.status.toLowerCase()} ${vitals.lifePrimary ? "has-life" : ""}`}>
+          {vitals.lifePrimary ? (
+            <>
+              <strong>{vitals.lifePrimary}</strong>
+              <span>{vitals.lifeSecondary}</span>
+              <span className="vital-device">{vitals.primary} {vitals.secondary}</span>
+            </>
+          ) : (
+            <>
+              <strong>{vitals.primary}</strong>
+              <span>{vitals.secondary}</span>
+            </>
+          )}
         </div>
       ) : null}
       {room.doors.map((door, index) => (
@@ -1697,32 +1887,39 @@ function PropView({
   const w = (prop.w ?? 1) * GEN2_TILE;
   const h = (prop.h ?? 1) * GEN2_TILE;
   const source = originalProp ?? prop;
+  const { life } = useContext(LifeContext);
+  const lifeProp = lifePropState(source, life, Date.now());
+  const selectionFor = (): Selection => (lifeProp?.selection ? lifeSelectionToSelection(lifeProp.selection) : propSelection(source, roomVitals));
+  const environment = lifeProp?.ownsLook ? "" : environmentClass(source, roomVitals, incidentPhase, incidentTargetRoom);
+  const stressed = !lifeProp?.ownsLook && isStressedPlant(source, roomVitals);
+  const production = lifeProp?.ownsProduction || lifeProp?.ownsLook ? "" : productionClass(source, productionPhase, incidentPhase, incidentTargetRoom);
 
   return (
     <button
       type="button"
       data-label={prop.label}
-      className={`gen2-prop prop-${prop.kind} ${prop.variant ? `variant-${prop.variant}` : ""} ${spriteClass(source)} ${isStressedPlant(source, roomVitals) ? "is-stressed-plant" : ""} ${environmentClass(source, roomVitals, incidentPhase, incidentTargetRoom)} ${productionClass(source, productionPhase, incidentPhase, incidentTargetRoom)} ${detail ? "is-detail-prop" : ""}`}
-      style={{ left: prop.x * GEN2_TILE, top: prop.y * GEN2_TILE, width: w, height: h }}
+      data-tag={lifeProp?.tag}
+      className={`gen2-prop prop-${prop.kind} ${prop.variant ? `variant-${prop.variant}` : ""} ${spriteClass(source, lifeProp?.stage)} ${stressed ? "is-stressed-plant" : ""} ${environment} ${production} ${lifeProp?.classes ?? ""} ${detail ? "is-detail-prop" : ""}`}
+      style={{ left: prop.x * GEN2_TILE, top: prop.y * GEN2_TILE, width: w, height: h, ...(lifeProp?.style as CSSProperties | undefined) }}
       onClick={(event) => {
         event.stopPropagation();
-        onSelect(propSelection(source, roomVitals));
+        onSelect(selectionFor());
       }}
       onDoubleClick={(event) => {
         event.stopPropagation();
         if (source.kind === "terminal" && source.room === "rd2") onTerminalOpen(source);
-        if (source.kind === "crate" || source.kind === "shelf") onSelect(propSelection(source, roomVitals));
+        if (source.kind === "crate" || source.kind === "shelf") onSelect(selectionFor());
       }}
       onContextMenu={(event) =>
         onContextMenu(event, {
           title: source.kind.toUpperCase(),
           items: [
-            { label: "Inspect stats", action: () => onSelect(propSelection(source, roomVitals)) },
+            { label: "Inspect stats", action: () => onSelect(selectionFor()) },
             ...(source.kind === "terminal" && source.room === "rd2" ? [{ label: "Open model chat", action: () => onTerminalOpen(source) }] : []),
-            ...(source.kind === "crate" || source.kind === "shelf" ? [{ label: "Open logs", action: () => onSelect(propSelection(source, roomVitals)) }] : []),
+            ...(source.kind === "crate" || source.kind === "shelf" ? [{ label: "Open logs", action: () => onSelect(selectionFor()) }] : []),
             ...(source.kind === "desk" && source.room === "screen" && onFacilityEditor ? [{ label: "Room editor", action: onFacilityEditor }] : []),
             { label: "Maintenance", action: () => onSelect(actionSelection("MAINTENANCE", [`TARGET: ${source.kind.toUpperCase()}`, "STATUS: CHECK REQUESTED", "RISK: LOW"])) },
-            { label: isPlant(source) ? "Check plant" : "Power cycle", action: () => onSelect(propSelection(source, roomVitals)) },
+            { label: isPlant(source) ? "Check plant" : "Power cycle", action: () => onSelect(selectionFor()) },
           ],
         })
       }
@@ -1760,8 +1957,12 @@ function NpcView({
   const chat = source.sim?.chat;
   const errand = source.sim?.errand;
   const seated = !!errand && errand.stage === "use" && !!errand.seat;
+  const task = source.sim?.task;
+  const taskStop = task?.stops[task.idx];
+  const working = !!task && !errand && task.stage === "use" && !!taskStop;
   const bubbleText = incidentBubble(source, incidentPhase, incidentTargetRoom)
     ?? chat?.say
+    ?? (working ? taskStop?.say : undefined)
     ?? (errand?.stage === "use" ? ERRAND_TAGS[errand.kind] : undefined)
     ?? (npc.pause > 0 ? moodBubble(source, staff) : "");
 
@@ -1790,8 +1991,9 @@ function NpcView({
     >
       {selected ? <span className="gen2-route-marker" /> : null}
       {bubbleText ? <span className={`gen2-bubble ${chat ? `is-chat chat-${chat.side}` : ""}`}>{bubbleText}</span> : null}
-      <span className={`gen2-npc role-${source.role} face-${npc.dir} step-${npc.stepFrame} activity-${npcActivity(source)} ${seated ? "is-seated" : ""}`} style={staffStyle(staff)} />
+      <span className={`gen2-npc role-${source.role} face-${npc.dir} step-${npc.stepFrame} activity-${working ? "busy" : npcActivity(source)} ${seated ? "is-seated" : ""}`} style={staffStyle(staff)} />
       {cargo ? <span className={`npc-cargo cargo-${cargo}`} /> : null}
+      {working && taskStop?.act ? <span className={`npc-fx ${taskStop.act === "spray" ? "fx-spray" : taskStop.act === "mop" ? "fx-mop" : "fx-work"}`} /> : null}
     </button>
   );
 }
@@ -2343,9 +2545,9 @@ function persistNpcs(npcs: LiveNpc[]) {
   window.localStorage.setItem(NPC_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), npcs: sanitizeNpcs(npcs, walkable), removedBaseIds }));
 }
 
-const EMPTY_SIM_CONTEXT: NpcSimContext = { incidentPhase: 0, stress: {}, hot: [], alerts: 0, schedules: {}, homes: {}, minute: 12 * 60, abs: 0, day: 0 };
+const EMPTY_SIM_CONTEXT: NpcSimContext = { incidentPhase: 0, stress: {}, hot: [], alerts: 0, schedules: {}, homes: {}, minute: 12 * 60, abs: 0, day: 0, lifeActive: new Set<string>(), batchRoom: {} };
 
-function buildSimContext(vitals: RoomVitals, incidentPhase: number, staff: Record<string, GrowOpsStaff>): NpcSimContext {
+function buildSimContext(vitals: RoomVitals, incidentPhase: number, staff: Record<string, GrowOpsStaff>, lifecycle?: LifecycleSnapshot): NpcSimContext {
   const stress: Record<string, number> = {};
   const hot: string[] = [];
   let alerts = 0;
@@ -2365,7 +2567,7 @@ function buildSimContext(vitals: RoomVitals, incidentPhase: number, staff: Recor
     if (member.schedule) schedules[id] = member.schedule;
     if (member.stationRoomId) homes[id] = member.stationRoomId;
   }
-  return { ...EMPTY_SIM_CONTEXT, incidentPhase, stress, hot, alerts, schedules, homes };
+  return { ...EMPTY_SIM_CONTEXT, incidentPhase, stress, hot, alerts, schedules, homes, lifeActive: lifecycle ? lifeActiveKeys(lifecycle) : EMPTY_SIM_CONTEXT.lifeActive, batchRoom: lifecycle ? lifeBatchRooms(lifecycle) : {} };
 }
 
 /** Facility clock follows the browser's wall clock. */
@@ -2432,29 +2634,50 @@ function floodReachable(walkable: Set<string>) {
   return seen;
 }
 
-function getStations(): Stations {
-  if (stationCache) return stationCache;
-  const walkable = buildWalkable();
-  const reach = floodReachable(walkable);
-  const propCovers = (prop: Gen2Prop, x: number, y: number) => x >= prop.x && x < prop.x + (prop.w ?? 1) && y >= prop.y && y < prop.y + (prop.h ?? 1);
-  const adjacent = (kinds: Gen2Prop["kind"][], roomId: string): Spot[] => {
-    const spots = new Map<string, Spot>();
-    for (const prop of gen2Props.filter((item) => kinds.includes(item.kind) && item.room === roomId)) {
-      for (let y = prop.y; y < prop.y + (prop.h ?? 1); y += 1) {
-        for (let x = prop.x; x < prop.x + (prop.w ?? 1); x += 1) {
-          const around: Array<[number, number, Gen2Direction]> = [[0, 1, "up"], [0, -1, "down"], [-1, 0, "right"], [1, 0, "left"]];
-          for (const [dx, dy, face] of around) {
-            const sx = x + dx;
-            const sy = y + dy;
-            const key = tileKey(sx, sy);
-            if (propCovers(prop, sx, sy) || !reach.has(key) || roomAt(sx, sy)?.id !== roomId) continue;
-            if (!spots.has(key)) spots.set(key, { x: sx, y: sy, face, roomId });
-          }
+let reachCache: Set<string> | undefined;
+
+function getReach() {
+  if (!reachCache) reachCache = floodReachable(buildWalkable());
+  return reachCache;
+}
+
+function propCoversTile(prop: Gen2Prop, x: number, y: number) {
+  return x >= prop.x && x < prop.x + (prop.w ?? 1) && y >= prop.y && y < prop.y + (prop.h ?? 1);
+}
+
+const adjacentCache = new Map<string, Spot[]>();
+
+/** Reachable floor tiles next to props of the given kinds, inside one room (cached). */
+function adjacentSpotsFor(kinds: Gen2Prop["kind"][], roomId: string): Spot[] {
+  const cacheKey = `${roomId}|${kinds.join(",")}`;
+  const cached = adjacentCache.get(cacheKey);
+  if (cached) return cached;
+  const reach = getReach();
+  const spots = new Map<string, Spot>();
+  for (const prop of gen2Props.filter((item) => kinds.includes(item.kind) && item.room === roomId)) {
+    for (let y = prop.y; y < prop.y + (prop.h ?? 1); y += 1) {
+      for (let x = prop.x; x < prop.x + (prop.w ?? 1); x += 1) {
+        const around: Array<[number, number, Gen2Direction]> = [[0, 1, "up"], [0, -1, "down"], [-1, 0, "right"], [1, 0, "left"]];
+        for (const [dx, dy, face] of around) {
+          const sx = x + dx;
+          const sy = y + dy;
+          const key = tileKey(sx, sy);
+          if (propCoversTile(prop, sx, sy) || !reach.has(key) || roomAt(sx, sy)?.id !== roomId) continue;
+          if (!spots.has(key)) spots.set(key, { x: sx, y: sy, face, roomId });
         }
       }
     }
-    return [...spots.values()];
-  };
+  }
+  const result = [...spots.values()];
+  adjacentCache.set(cacheKey, result);
+  return result;
+}
+
+function getStations(): Stations {
+  if (stationCache) return stationCache;
+  const reach = getReach();
+  const propCovers = propCoversTile;
+  const adjacent = adjacentSpotsFor;
   const tableLike = (x: number, y: number) => gen2Props.some((prop) => ["desk", "table", "trimTable", "terminal"].includes(prop.kind) && propCovers(prop, x, y));
   const chairSpots = (roomId: string): Spot[] => gen2Props
     .filter((prop) => prop.kind === "chair" && prop.room === roomId)
@@ -2631,7 +2854,7 @@ function chatSetting(a: LiveNpc, b: LiveNpc, ctx: NpcSimContext) {
 function chatAvailable(npc: LiveNpc, ctx: NpcSimContext) {
   if (npc.id === "boss") return false;
   const sim = npc.sim;
-  if (!sim || sim.chat || sim.chatCd > 0) return false;
+  if (!sim || sim.chat || sim.chatCd > 0 || sim.task) return false;
   if (!gen2OnShift(scheduleOf(npc, ctx), ctx.minute)) return false;
   if (isCriticalNow(npc, ctx) || visibleCargo(npc, ctx.incidentPhase)) return false;
   if (isBathroomTile(npc.x, npc.y)) return false;
@@ -2735,7 +2958,7 @@ function tickSim(sim: NpcSim, npc: LiveNpc, ctx: NpcSimContext): NpcSim {
 }
 
 function spotTaken(spot: { x: number; y: number }, all: LiveNpc[], selfId: string) {
-  return all.some((other) => other.id !== selfId && ((other.x === spot.x && other.y === spot.y) || (other.sim?.errand && other.sim.errand.x === spot.x && other.sim.errand.y === spot.y && other.sim.errand.kind !== "seek")));
+  return all.some((other) => other.id !== selfId && ((other.x === spot.x && other.y === spot.y) || (other.sim?.errand && other.sim.errand.x === spot.x && other.sim.errand.y === spot.y && other.sim.errand.kind !== "seek") || (other.sim?.task?.spot && other.sim.task.spot.x === spot.x && other.sim.task.spot.y === spot.y)));
 }
 
 function pickSpot(spots: Spot[], from: { x: number; y: number }, all: LiveNpc[], selfId: string, near?: { x: number; y: number }): Spot | undefined {
@@ -2855,6 +3078,9 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
     }
   }
 
+  // Lifecycle jobs end with the shift or when the fire/security incident calls the worker away.
+  if (sim.task && (!onShift || critical)) sim = { ...sim, task: undefined };
+
   // 3. Errands: urgent needs, break-room chain, and the daily work stations.
   if (critical && sim.mode === "work" && sim.errand?.kind === "work" && sim.errand.left > 0) sim = { ...sim, errand: { ...sim.errand, left: 0 } };
   if (critical && sim.errand && sim.errand.kind !== "work") sim = { ...sim, errand: undefined };
@@ -2879,6 +3105,8 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
       sim = { ...sim, errandCd: 4 + Math.floor(Math.random() * 6) };
     }
   }
+  // A running lifecycle job (breaks and urgent needs above take priority and simply pause it).
+  if (!sim.errand && sim.task && sim.mode === "work" && !onBreak) return advanceTask(npc, sim, walkable, allNpcs, ctx);
   if (!sim.errand && sim.mode === "work" && !onBreak) {
     if (npc.pause > 0) return { ...npc, pause: npc.pause - 1, stepFrame: 0, sim };
     const errand = workErrand(npc, sim, allNpcs, ctx, onShift);
@@ -2960,6 +3188,99 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
   }
 
   return { ...npc, stepFrame: 0, sim };
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle jobs: event-driven tasks layered on top of the schedule / needs / conversation system
+// ---------------------------------------------------------------------------
+
+function taskReady(npc: LiveNpc, ctx: NpcSimContext, busy: Set<string>) {
+  const sim = npc.sim;
+  if (!sim || busy.has(npc.id) || sim.task || sim.chat || sim.mode !== "work") return false;
+  if (sim.errand && sim.errand.kind !== "work") return false;
+  if (npc.id === "boss" || isCriticalNow(npc, ctx)) return false;
+  if (!gen2OnShift(scheduleOf(npc, ctx), ctx.minute) || isOnBreak(npc, ctx)) return false;
+  return !visibleCargo(npc, ctx.incidentPhase);
+}
+
+/** Hands queued lifecycle tasks to the first free candidate worker; expired or obsolete tasks are dropped. */
+function dispatchLifeTasks(npcs: LiveNpc[], queue: PendingTask[], ctx: NpcSimContext, now: number) {
+  const assignments: Record<string, NpcTask> = {};
+  const remaining: PendingTask[] = [];
+  const dropped: string[] = [];
+  const busy = new Set<string>();
+  for (const pending of queue) {
+    const keys = pending.stops.map((stop) => stop.whileKey).filter((key): key is string => !!key);
+    if (now > pending.expires || (keys.length > 0 && !keys.some((key) => ctx.lifeActive.has(key)))) {
+      dropped.push(pending.key);
+      continue;
+    }
+    const worker = pending.candidates.map((id) => npcs.find((npc) => npc.id === id)).find((npc): npc is LiveNpc => !!npc && taskReady(npc, ctx, busy));
+    if (!worker) {
+      remaining.push(pending);
+      continue;
+    }
+    busy.add(worker.id);
+    assignments[worker.id] = { id: pending.id, key: pending.key, label: pending.label, stops: pending.stops, idx: 0, stage: "pick", left: 0, waited: 0, timeout: 0 };
+  }
+  return { assignments, remaining, dropped };
+}
+
+function applyTaskAssignments(npcs: LiveNpc[], assignments: Record<string, NpcTask>) {
+  if (!Object.keys(assignments).length) return npcs;
+  return npcs.map((npc) => {
+    const task = assignments[npc.id];
+    if (!task || !npc.sim) return npc;
+    return { ...npc, pause: 0, sim: { ...npc.sim, task, errand: npc.sim.errand?.kind === "work" ? undefined : npc.sim.errand, via: undefined, legFor: -1 } };
+  });
+}
+
+function pickTaskSpot(roomId: string, near: Gen2Prop["kind"][] | undefined, npc: LiveNpc, all: LiveNpc[]): Spot | undefined {
+  let spots = near ? adjacentSpotsFor(near, roomId) : [];
+  if (!spots.length) spots = getStations().workSpots[roomId] ?? [];
+  if (!spots.length) return undefined;
+  return pickSpot(spots, npc, all, npc.id) ?? spots[Math.floor(Math.random() * spots.length)];
+}
+
+function advanceTask(npc: LiveNpc, sim: NpcSim, walkable: Set<string>, allNpcs: LiveNpc[], ctx: NpcSimContext): LiveNpc {
+  const trait = gen2SimTraitFor(npc.id);
+  let task = sim.task as NpcTask;
+  const stop = task.stops[task.idx];
+  const end = () => standStill(npc, { ...sim, task: undefined }, undefined, 0);
+  if (!stop) return end();
+  const skip = () => standStill(npc, { ...sim, task: { ...task, idx: task.idx + 1, stage: "pick", spot: undefined, left: 0, waited: 0, timeout: 0, carrying: stop.drop ? undefined : task.carrying } }, undefined, 0);
+
+  if (task.stage === "pick") {
+    if (stop.whileKey && !ctx.lifeActive.has(stop.whileKey)) return skip();
+    const roomId = stop.room ?? (stop.batch ? ctx.batchRoom[stop.batch] : undefined);
+    if (!roomId) return task.waited > 60 ? skip() : standStill(npc, { ...sim, task: { ...task, waited: task.waited + 1 } }, undefined, 0);
+    const spot = pickTaskSpot(roomId, stop.near, npc, allNpcs);
+    if (!spot) return skip();
+    task = { ...task, stage: "go", spot: { x: spot.x, y: spot.y, face: spot.face }, timeout: 320, waited: 0 };
+    sim = { ...sim, task };
+  }
+
+  const spot = task.spot as { x: number; y: number; face?: Gen2Direction };
+  if (task.stage === "use" && (npc.x !== spot.x || npc.y !== spot.y)) {
+    task = { ...task, stage: "go", timeout: 200 };
+    sim = { ...sim, task };
+  }
+  if (task.stage === "go") {
+    if (task.timeout <= 0) return end();
+    if (stop.whileKey && !ctx.lifeActive.has(stop.whileKey)) return skip(); // the reason for this stop ended while walking
+    const progressed: NpcSim = { ...sim, task: { ...task, timeout: task.timeout - 1 } };
+    if (npc.x === spot.x && npc.y === spot.y) return standStill(npc, { ...sim, task: { ...task, stage: "use", left: stop.dwell, waited: 0 } }, spot.face);
+    const step = nextStep({ x: npc.x, y: npc.y }, spot, walkable);
+    if (!step) return end();
+    if (trait.pace < 1 && Math.random() > trait.pace) return standStill(npc, progressed);
+    return { ...npc, x: step.x, y: step.y, dir: directionTo(npc.x, npc.y, step.x, step.y), stepFrame: npc.stepFrame === 1 ? 2 : 1, sim: progressed };
+  }
+
+  // at the stop: finish the minimum dwell, then keep working while the lifecycle says the job is still going
+  const stillNeeded = !stop.whileKey || ctx.lifeActive.has(stop.whileKey);
+  if (task.left > 0 && stillNeeded) return standStill(npc, { ...sim, task: { ...task, left: task.left - 1 } }, spot.face);
+  if (stop.whileKey && ctx.lifeActive.has(stop.whileKey) && task.waited < (stop.maxDwell ?? 900)) return standStill(npc, { ...sim, task: { ...task, waited: task.waited + 1 } }, spot.face);
+  return standStill(npc, { ...sim, task: { ...task, idx: task.idx + 1, stage: "pick", spot: undefined, left: 0, waited: 0, timeout: 0, carrying: stop.pickup ?? (stop.drop ? undefined : task.carrying) } }, undefined, 0);
 }
 
 function chooseDetour(npc: LiveNpc, target: { x: number; y: number }, wander: number) {
@@ -3181,6 +3502,7 @@ function roomSelection(room: Gen2Room, roomVitals: RoomVitals): Selection {
     type: "room",
     title: room.label,
     lines: [
+      ...(vitals?.lifePrimary ? [`LIFECYCLE: ${vitals.lifePrimary} / ${vitals.lifeSecondary}`, ...(vitals.lifeDetail ?? [])] : []),
       ...(vitals ? [`${vitals.status}: ${vitals.primary} / ${vitals.secondary}`, ...vitals.detail] : []),
       `JOB: ${operation.title}`,
       `OWNER: ${operation.owner}`,
@@ -3277,6 +3599,10 @@ function propSelection(prop: Gen2Prop, roomVitals: RoomVitals): Selection {
   return { type: "equipment", title: prop.kind.toUpperCase(), lines: [`TYPE: ${prop.kind.toUpperCase()}`, "POWER: ONLINE", prop.kind === "machine" || prop.kind === "terminal" ? "SIGNAL: STABLE" : "STATUS: READY", "MAINT: CLEAN"] };
 }
 
+function lifeSelectionToSelection(selection: LifeSelection): Selection {
+  return selection;
+}
+
 function actionSelection(title: string, lines: string[]): Selection {
   return { type: "equipment", title, lines };
 }
@@ -3297,12 +3623,12 @@ function plantStage(prop: Gen2Prop): PlantStage {
 }
 
 // Extra classes that switch a prop from its CSS-drawn look to a sprite (see styles.css / propSprites.css).
-function spriteClass(prop: Gen2Prop) {
+function spriteClass(prop: Gen2Prop, stage?: PlantStage) {
   const w = prop.w ?? 1;
   const h = prop.h ?? 1;
   if (prop.kind === "cutPlant") return "has-plant plant-dry";
   if (prop.kind === "plant" || prop.kind === "plantBed" || prop.kind === "tray") {
-    return `has-plant plant-${plantStage(prop)} ${(prop.x + prop.y) % 4 >= 2 ? "plant-flip" : ""}`;
+    return `has-plant plant-${stage ?? plantStage(prop)} ${(prop.x + prop.y) % 4 >= 2 ? "plant-flip" : ""}`;
   }
   if (prop.kind === "desk" || prop.kind === "table" || prop.kind === "trimTable") return "has-frame spr-desk";
   if (prop.kind === "shelf") return "has-frame spr-shelf";
@@ -3375,7 +3701,7 @@ function productionClass(prop: Gen2Prop, phase: number, incidentPhase: number, i
   return "";
 }
 
-function buildLiveRoomVitals(hostStats?: HostStats, dockerStats?: DockerStats, ollamaModels?: OllamaModels, facilityDevices?: FacilityDevices): RoomVitals {
+function buildLiveRoomVitals(hostStats?: HostStats, dockerStats?: DockerStats, ollamaModels?: OllamaModels, facilityDevices?: FacilityDevices, lifecycle?: LifecycleSnapshot): RoomVitals {
   const vitals: RoomVitals = { ...gen2RoomVitals };
   if (hostStats) {
     const cpu = hostStats.cpu.usedPercent;
@@ -3434,6 +3760,17 @@ function buildLiveRoomVitals(hostStats?: HostStats, dockerStats?: DockerStats, o
       secondary: ollamaModels.available ? "CHAT READY" : "NO MODELS",
       detail: ollamaModels.models.slice(0, 5).map((model, index) => `T${index + 1}: ${model.name}`),
     };
+  }
+  if (lifecycle) {
+    // Lifecycle text goes next to the device telemetry; rooms without a telemetry device get it as their vitals.
+    for (const [roomId, life] of Object.entries(lifeVitals(lifecycle))) {
+      const base = vitals[roomId];
+      if (life.replace || !base) {
+        vitals[roomId] = { ...(base ?? { status: "OK", primary: "", secondary: "", detail: [] }), status: life.status, primary: life.primary, secondary: life.secondary, detail: life.detail, lifePhase: life.phase };
+      } else {
+        vitals[roomId] = { ...base, lifePrimary: life.primary, lifeSecondary: life.secondary, lifeDetail: life.detail, lifePhase: life.phase };
+      }
+    }
   }
   return vitals;
 }
@@ -3621,7 +3958,8 @@ function incidentBubble(npc: LiveNpc, incidentPhase: number, incidentTargetRoom:
   return undefined;
 }
 
-function visibleCargo(npc: LiveNpc, incidentPhase: number): Gen2Npc["cargo"] | undefined {
+function visibleCargo(npc: LiveNpc, incidentPhase: number): Gen2Npc["cargo"] | TaskCargo | undefined {
+  if (npc.sim?.task?.carrying) return npc.sim.task.carrying;
   if (npc.id === "researcher") {
     if (incidentPhase === 14) return "extinguisher";
     return [1, 2].includes(npc.routeIndex) ? "extract" : undefined;
@@ -3709,7 +4047,9 @@ function npcActivity(npc: LiveNpc) {
 }
 
 function roomOfflineClass(room: Gen2Room, roomVitals: RoomVitals) {
-  return roomVitals[room.id]?.online === false ? "is-room-offline" : "";
+  const vital = roomVitals[room.id];
+  if (vital?.lifePhase && ["sterilizing", "cleaning", "sterile"].includes(vital.lifePhase)) return "is-room-sterile";
+  return vital?.online === false ? "is-room-offline" : "";
 }
 
 function floorFor(room: Gen2Room) {

@@ -4,6 +4,7 @@ import { App } from "./App";
 import "./styles.css";
 import "./propSprites.css";
 import "./sceneSprites.css";
+import "./lifecycle.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
