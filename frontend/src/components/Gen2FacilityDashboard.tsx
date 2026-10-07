@@ -18,6 +18,8 @@ import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule
 import type { Gen2HotKey } from "../game/gen2OperationsData";
 import { LifecyclePanel } from "./LifecyclePanel";
 import { WalkMode } from "../walk/WalkMode";
+import { TalkDialog } from "../talk/TalkDialog";
+import type { TalkBrief } from "../talk/talkBrief";
 import type { WalkDir, WalkHost, WalkNpc, WalkPlantLook, WalkView } from "../walk/walkTypes";
 import { lifecycleMockEnabled, mockLifecycleSnapshot } from "../game/lifecycleMock";
 import {
@@ -373,6 +375,34 @@ export function Gen2FacilityDashboard() {
   const walkNpcCacheRef = useRef<{ src: LiveNpc[]; staff: Record<string, GrowOpsStaff>; out: WalkNpc[] } | undefined>(undefined);
   const walkHostRef = useRef<WalkHost>(undefined as unknown as WalkHost);
 
+  // Talk to staff (Pokemon-style dialog backed by POST /api/npc/chat).
+  const [talk, setTalk] = useState<{ npcId: string; x: number; y: number; interrupt?: string } | undefined>();
+  const talkNpc = talk ? npcs.find((npc) => npc.id === talk.npcId) : undefined;
+  const workLogRef = useRef<Record<string, { sig?: WorkerSig; items: string[] }>>({});
+
+  // Per-worker rolling "what did you do lately" log, derived from changes in the sim state (rooms, breaks, chats, lifecycle jobs, trips, incidents).
+  useEffect(() => {
+    const stamp = gen2FormatClock12(clockMinuteNow());
+    const logs = workLogRef.current;
+    for (const npc of npcs) {
+      if (!npc.sim) continue;
+      const entry = (logs[npc.id] ??= { items: [] });
+      const sig = workerSig(npc, isCriticalNow(npc, simContextRef.current));
+      const events = diffWorkerSig(entry.sig, sig);
+      entry.sig = sig;
+      for (const text of events) {
+        if (text.startsWith("walked into") && entry.items[entry.items.length - 1]?.includes(": walked into")) entry.items.pop();
+        entry.items.push(`${stamp}: ${text}`);
+        if (entry.items.length > 6) entry.items.shift();
+      }
+    }
+    if (talk) {
+      if (!talkNpc) closeTalk();
+      else if ((talkNpc.x !== talk.x || talkNpc.y !== talk.y) && !talk.interrupt) setTalk({ ...talk, interrupt: "Sorry, I have to run! Duty calls." });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [npcs]);
+
   useLayoutEffect(() => {
     function fitBoard() {
       const viewport = viewportRef.current?.getBoundingClientRect();
@@ -661,6 +691,11 @@ export function Gen2FacilityDashboard() {
   }
 
   function walkBack() {
+    if (talk) {
+      // the on-screen B button: hand it to the dialog like the Escape key
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      return true;
+    }
     if (contextMenu) { setContextMenu(undefined); return true; }
     if (terminalSession) { setTerminalSession(undefined); return true; }
     if (dialog) { setDialog(undefined); return true; }
@@ -685,7 +720,7 @@ export function Gen2FacilityDashboard() {
   function walkInteract(x: number, y: number): string | undefined {
     const npc = npcsRef.current.find((item) => item.x === x && item.y === y);
     if (npc) {
-      openStaffBattle(npc);
+      openTalk(npc);
       return undefined;
     }
     const prop = walkPropAt(x, y);
@@ -796,7 +831,7 @@ export function Gen2FacilityDashboard() {
     interact: walkInteract,
     describe: walkDescribe,
     back: walkBack,
-    inputBlocked: () => !!terminalSession || !!dialog || growOpsOpen,
+    inputBlocked: () => !!terminalSession || !!dialog || growOpsOpen || !!talk,
   };
 
   function openRoom(room: Gen2Room) {
@@ -879,6 +914,79 @@ export function Gen2FacilityDashboard() {
     });
   }
 
+  function openTalk(npc: LiveNpc) {
+    const player = walk.active ? playerTileRef.current : null;
+    const face = player ? faceToward(npc, player, "down") : "down";
+    TALK_HOLD.clear();
+    TALK_HOLD.set(npc.id, face);
+    setNpcs((current) => current.map((item) => (item.id === npc.id ? { ...item, dir: face, stepFrame: 0 } : item)));
+    setContextMenu(undefined);
+    if (walk.active) setSelection(undefined);
+    setTalk({ npcId: npc.id, x: npc.x, y: npc.y });
+  }
+
+  function closeTalk() {
+    TALK_HOLD.clear();
+    setTalk(undefined);
+  }
+
+  /** The brief POSTed to /api/npc/chat: the worker's live profile and state, the roster, who is nearby, and their recent / upcoming lists. */
+  function buildTalkBrief(npcId: string): TalkBrief {
+    const live = (npcsRef.current.find((item) => item.id === npcId) ?? npcs.find((item) => item.id === npcId)) as LiveNpc;
+    const profile = staff[live.id] ?? defaultGrowOpsStaff(live);
+    const block = scheduleBlockFor(live, profile);
+    const schedule = profile.schedule ?? gen2DefaultSchedule(live.id, profile.department);
+    const roomName = roomAt(live.x, live.y)?.label ?? "the hallway";
+    const recent = (workLogRef.current[live.id]?.items ?? []).slice(-6);
+    const upcoming: string[] = [];
+    const task = live.sim?.task;
+    if (task) {
+      const left = task.stops.length - task.idx - 1;
+      upcoming.push(`finish the lifecycle job "${task.label}"${left > 0 ? ` (${left} more stop${left === 1 ? "" : "s"})` : ""}`);
+    }
+    for (const queued of pendingTasksRef.current) if (queued.candidates.includes(live.id)) upcoming.push(`take on the lifecycle job "${queued.label}" once free`);
+    const errand = live.sim?.errand;
+    if (errand && errand.stage === "go" && errand.kind !== "work") upcoming.push(`${ERRAND_LABELS[errand.kind][0].toLowerCase()} right now`);
+    if (live.route.length > 1) {
+      const start = live.sim?.mode === "trip" ? (live.sim.tripIdx ?? 0) : live.routeIndex;
+      const stops = Array.from({ length: Math.min(3, live.route.length) }, (_, i) => live.route[(start + i) % live.route.length]).map((stop) => roomAt(stop.x, stop.y)?.label ?? "the hallway");
+      const unique = stops.filter((label, i) => stops.indexOf(label) === i);
+      upcoming.push(`${live.sim?.mode === "trip" ? "heading on a handoff round via" : "next handoff round passes"} ${unique.join(", then ")}`);
+    }
+    if (live.id !== "boss") upcoming.push(`next scheduled break: ${block.nextBreakLabel}`);
+    if (schedule.shiftEnd < 1440) upcoming.push(`shift ends at ${gen2FormatClock12(schedule.shiftEnd)}`);
+    const nearby = npcsRef.current
+      .filter((other) => other.id !== live.id && (other.x - live.x) ** 2 + (other.y - live.y) ** 2 <= 36)
+      .sort((a, b) => (a.x - live.x) ** 2 + (a.y - live.y) ** 2 - ((b.x - live.x) ** 2 + (b.y - live.y) ** 2))
+      .slice(0, 6)
+      .map((other) => ({ name: staff[other.id]?.name ?? npcName(other.id), doing: npcDoingLabel(other).toLowerCase() }));
+    return {
+      npc: {
+        id: live.id,
+        name: profile.name,
+        title: profile.title,
+        department: profile.department,
+        room: roomName,
+        sex: profile.sex,
+        age: profile.age,
+        personality: profile.personality,
+        mood: moodText(live, profile),
+        workEthic: profile.workEthic,
+        action: npcDoingLabel(live).toLowerCase(),
+        need: npcNeedHint(live).toLowerCase(),
+        block: scheduleBlockText(live, profile),
+        nextBreak: block.nextBreakLabel,
+        recent: recent.length ? recent : [`has been working around ${roomName} since the visitor arrived`],
+        upcoming: upcoming.slice(0, 6),
+      },
+      roster: npcs.map((other) => {
+        const info = staff[other.id] ?? defaultGrowOpsStaff(other);
+        return { id: other.id, name: info.name, title: info.title, department: info.department };
+      }),
+      nearby,
+    };
+  }
+
   function openStaffBattle(npc: LiveNpc) {
     const profile = staff[npc.id] ?? defaultGrowOpsStaff(npc);
     setStaffBattleId(npc.id);
@@ -947,7 +1055,7 @@ export function Gen2FacilityDashboard() {
                 <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} onFacilityEditor={() => openGrowOps("facility")} />
               ))}
               {npcs.map((npc) => (
-                <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} />
+                <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onTalk={openTalk} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} />
               ))}
               <LifeBubbles />
               <RoutePathOverlay npc={npcs.find((item) => item.id === highlightRouteId)} />
@@ -958,7 +1066,7 @@ export function Gen2FacilityDashboard() {
               ) : null}
             </div>
           ) : (
-            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} activityState={activityState} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
+            <RoomDetail room={focusedRoom} npcs={npcs} staff={staff} roomVitals={roomVitals} activityState={activityState} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selectedNpcId={staffBattleId} onBack={closeRoom} onGrowOps={() => openGrowOps("staff")} onFacilityEditor={() => openGrowOps("facility")} onSelect={setSelection} onStaffOpen={openStaffBattle} onTalk={openTalk} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} highlightedRouteId={highlightRouteId} />
           )}
           {walk.active ? (
             <WalkMode
@@ -987,6 +1095,7 @@ export function Gen2FacilityDashboard() {
           ) : null}
           {contextMenu ? <ContextMenu menu={contextMenu} onClose={() => setContextMenu(undefined)} /> : null}
           {terminalSession ? <TerminalPanel session={terminalSession} onClose={() => setTerminalSession(undefined)} /> : null}
+          {talk && talkNpc ? <TalkDialog key={talk.npcId} speaker={(staff[talk.npcId]?.name ?? humanizeNpcId(talk.npcId)).toUpperCase()} getBrief={() => buildTalkBrief(talk.npcId)} interrupt={talk.interrupt} onStats={() => { const target = talkNpc; closeTalk(); openStaffBattle(target); }} onClose={closeTalk} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
           {activityLabOpen ? <ActivityLabDrawer activityState={activityState} intercomNotice={intercomNotice} onRunControl={runActivityControl} onRunScenario={runActivityScenario} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} onClose={() => setActivityLabOpen(false)} isSavingActivity={isSavingActivity} activityHistoryCount={activityHistoryCount} /> : null}
           {lifecycleOpen ? <LifecyclePanel life={life} onClose={() => setLifecycleOpen(false)} /> : null}
@@ -1882,6 +1991,7 @@ function RoomDetail({
   onFacilityEditor,
   onSelect,
   onStaffOpen,
+  onTalk,
   onStaffEdit,
   onContextMenu,
   onTerminalOpen,
@@ -1901,6 +2011,7 @@ function RoomDetail({
   onFacilityEditor: () => void;
   onSelect: (selection: Selection) => void;
   onStaffOpen: (npc: LiveNpc) => void;
+  onTalk: (npc: LiveNpc) => void;
   onStaffEdit: (npc: LiveNpc) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
   onTerminalOpen: (prop: Gen2Prop) => void;
@@ -1946,7 +2057,7 @@ function RoomDetail({
             <PropView key={`${room.id}-${prop.kind}-${index}`} prop={{ ...prop, x: prop.x - room.x, y: prop.y - room.y }} originalProp={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={onSelect} onContextMenu={onContextMenu} onTerminalOpen={onTerminalOpen} onFacilityEditor={onFacilityEditor} detail />
           ))}
           {roomNpcs.map((npc) => (
-            <NpcView key={`${room.id}-${npc.id}`} npc={{ ...npc, x: npc.x - room.x, y: npc.y - room.y }} originalNpc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={selectedNpcId === npc.id} onSelect={onSelect} onStaffOpen={onStaffOpen} onStaffEdit={onStaffEdit} onContextMenu={onContextMenu} detail />
+            <NpcView key={`${room.id}-${npc.id}`} npc={{ ...npc, x: npc.x - room.x, y: npc.y - room.y }} originalNpc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={selectedNpcId === npc.id} onSelect={onSelect} onStaffOpen={onStaffOpen} onTalk={onTalk} onStaffEdit={onStaffEdit} onContextMenu={onContextMenu} detail />
           ))}
           <LifeBubbles room={room} />
           <RoutePathOverlay npc={roomNpcs.find((item) => item.id === highlightedRouteId)} origin={{ x: room.x, y: room.y }} />
@@ -2146,6 +2257,7 @@ function NpcView({
   selected = false,
   onSelect,
   onStaffOpen,
+  onTalk,
   onStaffEdit,
   onContextMenu,
   detail = false,
@@ -2158,6 +2270,7 @@ function NpcView({
   selected?: boolean;
   onSelect: (selection: Selection) => void;
   onStaffOpen: (npc: LiveNpc) => void;
+  onTalk: (npc: LiveNpc) => void;
   onStaffEdit: (npc: LiveNpc) => void;
   onContextMenu: (event: React.MouseEvent, menu: Omit<ContextMenuState, "x" | "y">) => void;
   detail?: boolean;
@@ -2190,6 +2303,7 @@ function NpcView({
         onContextMenu(event, {
           title: source.id.replace(/([A-Z])/g, " $1").toUpperCase(),
           items: [
+            { label: "Talk", action: () => onTalk(source) },
             { label: "Staff stats", action: () => onSelect(staffSelection(source, staff)) },
             { label: "Edit character", action: () => onStaffEdit(source) },
             { label: "Preview route", action: () => onStaffOpen(source) },
@@ -3064,7 +3178,7 @@ function chatSetting(a: LiveNpc, b: LiveNpc, ctx: NpcSimContext) {
 function chatAvailable(npc: LiveNpc, ctx: NpcSimContext) {
   if (npc.id === "boss") return false;
   const sim = npc.sim;
-  if (!sim || sim.chat || sim.chatCd > 0 || sim.task) return false;
+  if (!sim || sim.chat || sim.chatCd > 0 || sim.task || TALK_HOLD.has(npc.id)) return false;
   if (!gen2OnShift(scheduleOf(npc, ctx), ctx.minute)) return false;
   if (isCriticalNow(npc, ctx) || visibleCargo(npc, ctx.incidentPhase)) return false;
   if (isBathroomTile(npc.x, npc.y)) return false;
@@ -3249,6 +3363,10 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
   const critical = isCriticalNow(npc, ctx);
   const schedule = scheduleOf(npc, ctx);
   const onShift = gen2OnShift(schedule, ctx.minute);
+
+  // 0. The player is talking to this worker: stand still facing them (an incident still calls the worker away).
+  const talkFace = TALK_HOLD.get(npc.id);
+  if (talkFace && !critical) return standStill(npc, sim.chat ? { ...sim, chat: undefined } : sim, talkFace);
 
   // 1. Conversations: stand, face partner, resume after a few seconds.
   if (sim.chat) {
@@ -4264,6 +4382,53 @@ function visibleCargo(npc: LiveNpc, incidentPhase: number): Gen2Npc["cargo"] | T
   };
   return npc.cargo && deliveryLegs[npc.id]?.includes(npc.routeIndex) ? npc.cargo : undefined;
 }
+
+type WorkerSig = { room?: string; errand?: ErrandKind; chat?: string; task?: string; carry?: string; trip: boolean; crit: boolean };
+
+function workerSig(npc: LiveNpc, crit: boolean): WorkerSig {
+  const sim = npc.sim;
+  const errand = sim?.errand;
+  return {
+    room: roomAt(npc.x, npc.y)?.label,
+    errand: errand && errand.stage === "use" && errand.kind !== "work" ? errand.kind : undefined,
+    chat: sim?.chat ? (gen2WorkerIdentity[sim.chat.with]?.name ?? humanizeNpcId(sim.chat.with)) : undefined,
+    task: sim?.task?.label,
+    carry: sim?.task?.carrying,
+    trip: sim?.mode === "trip",
+    crit,
+  };
+}
+
+const ERRAND_PAST: Partial<Record<ErrandKind, string>> = {
+  coffee: "grabbed a coffee at the coffee machine",
+  water: "refilled a water bottle",
+  fridge: "raided the break room fridge for a snack",
+  microwave: "heated up some lunch in the microwave",
+  bathroom: "made a restroom stop",
+  sit: "sat down for a short rest",
+  phone: "checked their phone on a break",
+  desk: "typed up some notes at a desk",
+  seek: "went looking for company",
+};
+
+function diffWorkerSig(prev: WorkerSig | undefined, next: WorkerSig): string[] {
+  if (!prev) return [];
+  const out: string[] = [];
+  if (next.crit && !prev.crit) out.push("responded to the facility alarm");
+  if (next.errand && next.errand !== prev.errand) out.push(`${ERRAND_PAST[next.errand] ?? "took a short break"}${next.room ? ` (${next.room})` : ""}`);
+  if (next.chat && next.chat !== prev.chat) out.push(`chatted with ${next.chat}`);
+  if (next.task && next.task !== prev.task) out.push(`started the lifecycle job: ${next.task}`);
+  if (prev.task && !next.task) out.push(`finished the lifecycle job: ${prev.task}`);
+  if (next.carry && next.carry !== prev.carry) out.push(`picked up ${next.carry} cargo`);
+  if (prev.carry && !next.carry) out.push(`delivered the ${prev.carry} cargo`);
+  if (next.trip && !prev.trip) out.push("set off on a handoff round between rooms");
+  if (prev.trip && !next.trip) out.push("finished a handoff round");
+  if (next.room && next.room !== prev.room) out.push(`walked into ${next.room}`);
+  return out;
+}
+
+/** Workers the player is talking to right now (id -> facing). advanceNpc holds them still until the conversation ends. */
+const TALK_HOLD = new Map<string, Gen2Direction>();
 
 const ERRAND_TAGS: Record<ErrandKind, string> = { coffee: "COF", water: "H2O", fridge: "YUM", microwave: "BZZ", bathroom: "", sit: "ZZ", phone: "TXT", desk: "TYP", seek: "", work: "" };
 

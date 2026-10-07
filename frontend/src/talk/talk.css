@@ -1,0 +1,227 @@
+/* Pokemon Gold/Silver style conversation: bordered white text box with a name tag, option menu, free-text input. */
+.talk-root {
+  position: absolute;
+  inset: 0;
+  z-index: 900;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #11151d;
+  image-rendering: pixelated;
+}
+
+.talk-box,
+.talk-menu,
+.talk-input {
+  pointer-events: auto;
+  border: 4px solid #11151d;
+  background: #ffffff;
+  box-shadow: inset -3px -3px 0 #b8c0c4, inset 3px 3px 0 #ffffff, 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.talk-box {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: max(10px, env(safe-area-inset-bottom));
+  min-height: 5.6em;
+  padding: 1.1em 1.1em 0.9em;
+  cursor: pointer;
+}
+
+.talk-box p {
+  margin: 0;
+  min-height: 3.6em;
+  font-size: clamp(0.82rem, 1.5vw, 1.02rem);
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  word-break: break-word;
+}
+
+.talk-name {
+  position: absolute;
+  left: 12px;
+  top: -15px;
+  padding: 1px 10px;
+  border: 3px solid #11151d;
+  background: #f6eed8;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.talk-arrow {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  font-size: 0.9rem;
+  animation: talk-blink 0.7s steps(1) infinite;
+}
+
+@keyframes talk-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.talk-dots i {
+  display: inline-block;
+  font-style: normal;
+  font-size: 1.4em;
+  line-height: 1;
+  margin-right: 0.25em;
+  animation: talk-dot 1.2s steps(1) infinite;
+}
+
+.talk-dots i:nth-child(2) {
+  animation-delay: 0.3s;
+}
+
+.talk-dots i:nth-child(3) {
+  animation-delay: 0.6s;
+}
+
+@keyframes talk-dot {
+  0% {
+    opacity: 0.15;
+  }
+  25%,
+  100% {
+    opacity: 1;
+  }
+}
+
+.talk-menu {
+  position: absolute;
+  right: 10px;
+  bottom: calc(max(10px, env(safe-area-inset-bottom)) + 7.4em);
+  display: grid;
+  grid-auto-flow: column;
+  gap: 0 8px;
+  padding: 8px 10px 8px 4px;
+}
+
+.talk-menu button {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  min-width: 150px;
+  padding: 0 8px 0 0;
+  border: 0;
+  background: transparent;
+  color: #11151d;
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.talk-menu button b {
+  display: inline-block;
+  width: 1.5em;
+  text-align: center;
+  font-size: 0.9em;
+}
+
+.talk-menu button.is-selected {
+  background: rgba(17, 21, 29, 0.06);
+}
+
+.talk-input {
+  position: absolute;
+  right: 10px;
+  left: 10px;
+  bottom: calc(max(10px, env(safe-area-inset-bottom)) + 7.4em);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.talk-input input {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  border: 0;
+  border-bottom: 3px solid #11151d;
+  background: transparent;
+  color: #11151d;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  outline: 0;
+}
+
+.talk-input input::placeholder {
+  color: #8b949a;
+}
+
+.talk-count {
+  font-size: 0.7rem;
+  color: #5a6368;
+  white-space: nowrap;
+}
+
+.talk-input button {
+  min-height: 36px;
+  min-width: 64px;
+  border: 3px solid #11151d;
+  background: #f6eed8;
+  color: #11151d;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.talk-input button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Phones in landscape: shorter box, bigger touch targets. */
+@media (max-height: 520px) {
+  .talk-box {
+    min-height: 4.2em;
+    padding: 0.9em 1em 0.6em;
+    left: 6px;
+    right: 6px;
+    bottom: 6px;
+  }
+
+  .talk-box p {
+    min-height: 2.8em;
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
+  .talk-menu {
+    bottom: calc(6px + 6.6em);
+    right: 6px;
+    gap: 0 4px;
+  }
+
+  .talk-menu button {
+    min-height: 36px;
+    min-width: 140px;
+    font-size: 0.78rem;
+  }
+
+  .talk-input {
+    bottom: calc(6px + 6.6em);
+    left: 6px;
+    right: 6px;
+  }
+}
+
+@media (max-width: 520px) {
+  .talk-menu {
+    grid-auto-flow: row;
+    grid-template-rows: none !important;
+    max-height: 62vh;
+    overflow: auto;
+  }
+}
