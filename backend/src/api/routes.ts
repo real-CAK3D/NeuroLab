@@ -11,6 +11,7 @@ import { db } from "../database/db";
 import { employeesQuery, reportsQuery, roomsQuery, tasksQuery } from "../database/queries";
 import { eventBus } from "../events/bus";
 import { getLifecycleSnapshot, getTimeScale, setTimeScale } from "../services/lifecycle";
+import { getPersona, npcChat, updatePersona, type NpcChatRequest, type NpcFacts } from "../services/npcChat";
 import { generateShiftReport, latestShiftReport, readHistory } from "../services/monitoring";
 
 const execFileAsync = promisify(execFile);
@@ -315,6 +316,24 @@ export function apiRouter(): Router {
     if (!Number.isFinite(scale) || scale < 1) return res.status(400).json({ error: "scale must be a number >= 1 (1 = real time, 24 = one real hour per facility day)" });
     setTimeScale(scale);
     res.json({ scale: getTimeScale() });
+  });
+
+  // Talk to a staff sprite: persona + brief + live facts, phrased by an Ollama model (template fallback).
+  router.post("/npc/chat", async (req: Request, res: Response) => {
+    const body = req.body as NpcChatRequest | undefined;
+    const topics = ["job", "recent", "upcoming", "coworkers", "day", "weather", "interests", "life", "facility", "free"];
+    if (!body?.npc?.id || !body.npc.name || !topics.includes(body.topic)) return res.status(400).json({ error: "npc {id,name} and a valid topic are required" });
+    const devices = await readFacilityDevices();
+    const [summary] = await Promise.all([computeSummary()]);
+    res.json(await npcChat(body, { summary, lifecycle: getLifecycleSnapshot(devices) as unknown as NpcFacts["lifecycle"] }));
+  });
+
+  router.get("/npc/persona/:id", (req: Request, res: Response) => {
+    res.json(getPersona(String(req.params.id)));
+  });
+
+  router.put("/npc/persona/:id", (req: Request, res: Response) => {
+    res.json(updatePersona(String(req.params.id), req.body ?? {}));
   });
 
   router.get("/history", (req: Request, res: Response) => {
