@@ -94,11 +94,15 @@ function detectTransitions(summary: Summary) {
   }
 }
 
+const NOT_CHAT_MODEL = /embed|minilm|bge|nomic|e5-|rerank|arctic-embed/i;
+
 async function pickOllamaModel(ollamaUrl: string): Promise<string | undefined> {
   if (process.env.NEUROLAB_REPORT_MODEL) return process.env.NEUROLAB_REPORT_MODEL;
   const response = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(3000) });
-  const data = await response.json() as { models?: Array<{ name: string; size?: number }> };
-  return [...(data.models ?? [])].sort((a, b) => (a.size ?? 0) - (b.size ?? 0))[0]?.name;
+  const data = await response.json() as { models?: Array<{ name: string; size?: number; details?: { family?: string } }> };
+  // Smallest installed model that can actually chat (embedding models such as all-minilm cannot).
+  const chatModels = (data.models ?? []).filter((model) => !NOT_CHAT_MODEL.test(model.name) && !/bert/i.test(model.details?.family ?? ""));
+  return chatModels.sort((a, b) => (a.size ?? 0) - (b.size ?? 0))[0]?.name;
 }
 
 async function narrate(prompt: string): Promise<{ text: string; model: string } | undefined> {
@@ -109,12 +113,13 @@ async function narrate(prompt: string): Promise<{ text: string; model: string } 
     const response = await fetch(`${ollamaUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, stream: false, messages: [{ role: "user", content: prompt }] }),
+      body: JSON.stringify({ model, stream: false, think: false, messages: [{ role: "user", content: prompt }] }),
       signal: AbortSignal.timeout(90_000),
     });
     if (!response.ok) return undefined;
     const data = await response.json() as { message?: { content?: string } };
-    const text = data.message?.content?.trim();
+    // Some models leak their reasoning, ending it with </think> (with or without an opening tag); keep only what follows.
+    const text = data.message?.content?.replace(/<think>[\s\S]*?<\/think>/g, "").split("</think>").pop()?.trim();
     return text ? { text, model } : undefined;
   } catch {
     return undefined;
