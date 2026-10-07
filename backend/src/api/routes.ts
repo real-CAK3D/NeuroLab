@@ -10,6 +10,7 @@ import { appConfig, createIntercomMessageSchema, createTaskSchema } from "../../
 import { db } from "../database/db";
 import { employeesQuery, reportsQuery, roomsQuery, tasksQuery } from "../database/queries";
 import { eventBus } from "../events/bus";
+import { getLifecycleSnapshot, getTimeScale, setTimeScale } from "../services/lifecycle";
 import { generateShiftReport, latestShiftReport, readHistory } from "../services/monitoring";
 
 const execFileAsync = promisify(execFile);
@@ -302,6 +303,18 @@ export function apiRouter(): Router {
       sampledAt: new Date().toISOString(),
       devices: await readFacilityDevices(),
     });
+  });
+
+  // Crop lifecycle (grow -> dry -> trim -> cure -> package -> warehouse -> sales) driven by real device state.
+  router.get("/lifecycle", async (_req: Request, res: Response) => {
+    res.json(getLifecycleSnapshot(await readFacilityDevices()));
+  });
+
+  router.post("/lifecycle/scale", (req: Request, res: Response) => {
+    const scale = Number(req.body?.scale);
+    if (!Number.isFinite(scale) || scale < 1) return res.status(400).json({ error: "scale must be a number >= 1 (1 = real time, 24 = one real hour per facility day)" });
+    setTimeScale(scale);
+    res.json({ scale: getTimeScale() });
   });
 
   router.get("/history", (req: Request, res: Response) => {
@@ -611,7 +624,7 @@ function telemetryInboxPath() {
   return process.env.TELEMETRY_INBOX_PATH || "/telemetry-inbox";
 }
 
-function readFacilityDevices() {
+export function readFacilityDevices() {
   return Promise.all([
     readTelemetryDevice("nukebox", "NukeBox", "mother", process.env.TELEMETRY_NUKEBOX_PATH),
     readTelemetryDevice("hp-laptop", "HP Laptop", "clone"),

@@ -1,7 +1,8 @@
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createLogger } from "../../shared/logging/logger";
-import { apiRouter, computeSummary } from "./api/routes";
+import { apiRouter, computeSummary, readFacilityDevices } from "./api/routes";
+import { startLifecycle } from "./services/lifecycle";
 import { startMonitoring } from "./services/monitoring";
 import { db, initDatabase } from "./database/db";
 import { eventBus } from "./events/bus";
@@ -14,6 +15,7 @@ const app = express();
 initDatabase();
 connectWebsocketWithRetry();
 startMonitoring(computeSummary);
+startLifecycle(() => readFacilityDevices());
 
 app.use(cors());
 app.use(express.json());

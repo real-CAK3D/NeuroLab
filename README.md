@@ -77,6 +77,24 @@ host names can be set with `NEUROLAB_ALLOWED_HOSTS` (comma separated); `*.ts.net
 - **Start at logon:** a scheduled task `NeuroLab Up` runs `scripts/neurolab-up.ps1 -NoBuild` one minute after logon.
 - **CI:** `.github/workflows/verify.yml` typechecks the services and runs `npm run verify` for the frontend.
 
+## Crop lifecycle (grow to sale)
+
+The backend runs a persistent crop simulation 24/7 (`backend/src/services/lifecycle.ts`), driven by real device state:
+
+1. **Dark rooms are cleaned out and sterilized.** A grow room whose device has been offline for a while is cleared and sterilized, then sealed and left waiting.
+2. **Startup:** when the device comes online, staff bring pots and soil, then take clones from the mother plants and plant them.
+3. **Grow:** half grown after week 1, full grown after week 2, ripe and harvested in week 3. A room dark for 3 days loses its crop and is sterilized again; high CPU/memory or outages lower the batch quality.
+4. **Harvest:** the room is cleaned, and the batch is hung in a dry room (THE GARDEN or CAK3D-CREATIONS, whichever is online) for **1 week**.
+5. **Trim:** one batch at a time, **1 week** each. Then back to a dry room to **cure for 2 weeks**.
+6. **Cured:** most batches go to packaging; some go to the extraction lab (2 days), and the extract is packaged too.
+7. **Packaged,** then the loading bay (cataloged), then the warehouse. Sales sells from the warehouse stock.
+8. **R&D sampling:** every facility day, samples are taken from growing rooms, drying/curing rooms and extraction.
+9. **Mother plants live 6 weeks.** A room that harvests without a mother of its own keeps one plant back to replace a lost one. With no mothers left, a new one is started from a seed pack after 2 days.
+
+Time runs at `NEUROLAB_TIME_SCALE` times real time (default **24**: one real hour is one facility day, so grow to warehouse takes about two real days; `1` is real time). Change it live with
+`POST /api/lifecycle/scale {"scale": 24}`. `GET /api/lifecycle` returns room phases, batches, mothers, inventory, sales, samples and a log.
+Preview it quickly with `npx tsx backend/scripts/simulate-lifecycle.ts 110` (fast-forwards 110 facility days on a scratch database).
+
 ## Space-Ghost integration
 
 `GET /api/summary` returns a compact read-only rollup (service health + latency, simulation tick,
