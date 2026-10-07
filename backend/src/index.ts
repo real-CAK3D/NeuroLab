@@ -1,7 +1,8 @@
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createLogger } from "../../shared/logging/logger";
-import { apiRouter } from "./api/routes";
+import { apiRouter, computeSummary } from "./api/routes";
+import { startMonitoring } from "./services/monitoring";
 import { db, initDatabase } from "./database/db";
 import { eventBus } from "./events/bus";
 import { connectWebsocketWithRetry } from "./websocket/client";
@@ -12,6 +13,7 @@ const app = express();
 
 initDatabase();
 connectWebsocketWithRetry();
+startMonitoring(computeSummary);
 
 app.use(cors());
 app.use(express.json());

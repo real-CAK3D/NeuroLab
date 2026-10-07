@@ -20,6 +20,12 @@ services:
       WEBSOCKET_URL: http://neurolab-websocket:3007
       AI_URL: http://neurolab-ai:3008
       MONITOR_URL: http://neurolab-monitor:3009
+      # Ollama runs on the Windows host. For the container to reach it, Ollama must listen on more than
+      # 127.0.0.1 (set OLLAMA_HOST=0.0.0.0 for the Ollama app). Without it, shift reports fall back to templates.
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      NEUROLAB_REPORT_MODEL: ${NEUROLAB_REPORT_MODEL:-}
+      # Optional: require "Authorization: Bearer <token>" on every write call to /api.
+      NEUROLAB_WRITE_TOKEN: ${NEUROLAB_WRITE_TOKEN:-}
       TELEMETRY_INBOX_PATH: /networking/Inbox
       TELEMETRY_NUKEBOX_PATH: /networking/Outbox/nukebox
     # Backend/engine/AI/monitor are reached through the frontend proxy; keep them off the LAN.
@@ -110,6 +116,7 @@ services:
     environment:
       # The browser only ever talks to this one port; /api is proxied to the backend.
       BACKEND_PROXY_TARGET: http://neurolab-backend:3006
+      WEBSOCKET_PROXY_TARGET: http://neurolab-websocket:3007
       NEUROLAB_ALLOWED_HOSTS: ${NEUROLAB_ALLOWED_HOSTS:-}
     # Published on all interfaces so LAN and Tailscale (tailscale serve -> 127.0.0.1:3005) can reach it.
     ports:

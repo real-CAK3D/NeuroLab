@@ -73,13 +73,56 @@ export type Gen2Prop = {
     | "pottingMix"
     | "experiment"
     | "extinguisher"
-    | "food";
+    | "food"
+    | "rug"
+    | "mat"
+    | "decal"
+    | "poster"
+    | "clock"
+    | "wallSign"
+    | "vent"
+    | "bulletin"
+    | "wallLight"
+    | "windowPane"
+    | "plantTag"
+    | "extCabinet"
+    | "bench"
+    | "bin"
+    | "fan"
+    | "humidifier"
+    | "glassware"
+    | "centrifuge"
+    | "microscope"
+    | "scale"
+    | "printer"
+    | "box"
+    | "hood"
+    | "condenser"
+    | "display"
+    | "stanchion"
+    | "vending"
+    | "sofa"
+    | "cabinet";
   x: number;
   y: number;
   w?: number;
   h?: number;
   room?: string;
+  /** Text for signs (shown through CSS attr()). */
+  label?: string;
+  /** Visual variant class suffix for decals, posters and rugs. */
+  variant?: string;
 };
+
+/** Props that sprites can walk across/behind (wall dressing, floor decals, overlays). */
+const GEN2_NON_SOLID_KINDS: ReadonlyArray<Gen2Prop["kind"]> = [
+  "monitor", "growLight", "pipe", "irrigation", "whiteboard", "sealedDoor",
+  "rug", "mat", "decal", "poster", "clock", "wallSign", "vent", "bulletin", "wallLight", "windowPane", "plantTag", "extCabinet",
+];
+
+export function gen2PropBlocksMovement(prop: Gen2Prop) {
+  return !GEN2_NON_SOLID_KINDS.includes(prop.kind);
+}
 
 export type Gen2Npc = {
   id: string;
@@ -342,9 +385,283 @@ const vmRoomProps: Gen2Prop[] = [
   { kind: "whiteboard", x: 22, y: 36, w: 6, h: 2, room: "soil" },
 ];
 
+// ---------------------------------------------------------------------------
+// Scenery pass: wall dressing, floor decals, rugs and room equipment.
+// Coordinates below are final (post-shift) tile coordinates.
+// ---------------------------------------------------------------------------
+
+type WallDecor = { kind: Gen2Prop["kind"]; w?: number; label?: string; variant?: string };
+
+const WALL_SIGN_LABELS: Record<string, string> = {
+  vmCreations: "CREATIONS", boss: "BOSS", clone: "CLONE", mother: "MOTHER", grow1: "GROW 1", grow2: "GROW 2", grow3: "GROW 3", grow4: "GROW 4",
+  soil: "GARDEN", potting: "POTTING", cultMgr: "CULT MGR", trim: "TRIM", pack: "PACK", extract: "EXTRACT", security: "SECURITY", ops: "OPS",
+  break: "BREAK", bath: "WC", screen: "SCREENING", maintenanceRoom: "MAINT", dock: "LOADING", warehouse: "WAREHOUSE", sales: "SALES", rd1: "R&D LAB", rd2: "R&D TEST",
+};
+
+const roomWallDecor: Record<string, WallDecor[]> = {
+  boss: [{ kind: "windowPane", w: 2 }, { kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "poster", variant: "chart" }, { kind: "windowPane", w: 2 }, { kind: "wallLight" }],
+  clone: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "clock" }],
+  mother: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "poster", variant: "leaf" }, { kind: "clock" }, { kind: "vent", w: 2 }],
+  grow1: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "clock" }, { kind: "vent", w: 2 }],
+  grow2: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "poster", variant: "leaf" }, { kind: "vent", w: 2 }],
+  grow3: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "clock" }, { kind: "vent", w: 2 }],
+  grow4: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "poster", variant: "warn" }, { kind: "vent", w: 2 }],
+  soil: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "poster", variant: "warn" }, { kind: "clock" }],
+  vmCreations: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "poster", variant: "warn" }, { kind: "clock" }],
+  potting: [{ kind: "wallSign", w: 2 }, { kind: "poster", variant: "leaf" }, { kind: "wallLight" }, { kind: "clock" }],
+  cultMgr: [{ kind: "windowPane", w: 2 }, { kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "bulletin", w: 2 }],
+  trim: [{ kind: "wallSign", w: 2 }, { kind: "vent", w: 2 }, { kind: "clock" }, { kind: "poster", variant: "warn" }, { kind: "wallLight" }, { kind: "vent", w: 2 }],
+  pack: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "poster", variant: "warn" }, { kind: "wallLight" }],
+  extract: [{ kind: "wallSign", w: 2 }, { kind: "poster", variant: "warn" }, { kind: "vent", w: 2 }, { kind: "clock" }, { kind: "wallLight" }],
+  security: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "poster", variant: "warn" }, { kind: "wallLight" }],
+  ops: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "bulletin", w: 2 }, { kind: "windowPane", w: 2 }],
+  break: [{ kind: "wallSign", w: 2 }, { kind: "windowPane", w: 2 }, { kind: "clock" }, { kind: "bulletin", w: 2 }, { kind: "poster", variant: "leaf" }, { kind: "windowPane", w: 2 }, { kind: "wallLight" }],
+  bath: [{ kind: "wallSign", w: 1 }, { kind: "vent", w: 2 }],
+  screen: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "poster", variant: "chart" }, { kind: "bulletin", w: 2 }, { kind: "windowPane", w: 2 }],
+  maintenanceRoom: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "bulletin", w: 2 }],
+  dock: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "poster", variant: "warn" }, { kind: "wallLight" }, { kind: "vent", w: 2 }, { kind: "wallLight" }, { kind: "bulletin", w: 2 }, { kind: "wallLight" }],
+  warehouse: [{ kind: "wallSign", w: 2 }, { kind: "clock" }, { kind: "wallLight" }, { kind: "poster", variant: "warn" }, { kind: "vent", w: 2 }, { kind: "wallLight" }, { kind: "bulletin", w: 2 }],
+  sales: [{ kind: "windowPane", w: 2 }, { kind: "wallSign", w: 2 }, { kind: "poster", variant: "chart" }, { kind: "clock" }, { kind: "poster", variant: "chart" }, { kind: "windowPane", w: 2 }, { kind: "bulletin", w: 2 }, { kind: "wallLight" }],
+  rd1: [{ kind: "wallSign", w: 2 }, { kind: "poster", variant: "warn" }, { kind: "clock" }, { kind: "vent", w: 2 }, { kind: "wallLight" }, { kind: "bulletin", w: 2 }],
+  rd2: [{ kind: "wallSign", w: 2 }, { kind: "poster", variant: "warn" }, { kind: "clock" }, { kind: "vent", w: 2 }, { kind: "wallLight" }, { kind: "bulletin", w: 2 }, { kind: "poster", variant: "chart" }],
+};
+
+function hashUnit(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 10000) / 10000;
+}
+
+function buildWallDecor(): Gen2Prop[] {
+  const decor: Gen2Prop[] = [];
+  for (const room of gen2Rooms) {
+    const doorSpans = room.doors.filter((door) => door.side === "top").map((door) => ({ from: room.x + door.at - 1, to: room.x + door.at + (door.size ?? 2) }));
+    let x = room.x + 2;
+    for (const item of roomWallDecor[room.id] ?? []) {
+      const w = item.w ?? 1;
+      for (const span of doorSpans) if (x <= span.to && x + w - 1 >= span.from) x = span.to + 1;
+      if (x + w > room.x + room.w - 2) break;
+      decor.push({ kind: item.kind, x, y: room.y, w, h: 1, room: room.id, variant: item.variant, label: item.kind === "wallSign" ? WALL_SIGN_LABELS[room.id] ?? room.label : undefined });
+      x += w + 1;
+    }
+  }
+  return decor;
+}
+
+function buildScuffs(): Gen2Prop[] {
+  const scuffs: Gen2Prop[] = [];
+  for (const room of gen2Rooms) {
+    const count = Math.max(2, Math.floor((room.w * room.h) / 55));
+    for (let i = 0; i < count; i += 1) {
+      const x = room.x + 1 + Math.floor(hashUnit(`${room.id}-sx-${i}`) * (room.w - 2));
+      const y = room.y + 2 + Math.floor(hashUnit(`${room.id}-sy-${i}`) * (room.h - 3));
+      scuffs.push({ kind: "decal", variant: i % 3 === 0 ? "stain" : "scuff", x, y, room: room.id });
+    }
+  }
+  return scuffs;
+}
+
+const sceneryProps: Gen2Prop[] = [
+  // Executive suite
+  { kind: "rug", variant: "red", x: 20, y: 7, w: 8, h: 6, room: "boss" },
+  { kind: "sofa", x: 18, y: 12, w: 3, room: "boss" },
+  { kind: "cabinet", x: 17, y: 8, h: 3, room: "boss" },
+  { kind: "bin", x: 32, y: 12, room: "boss" },
+  { kind: "mat", x: 24, y: 14, w: 2, room: "boss" },
+  // Cultivation rooms: tray tags, fans, humidifiers
+  ...Array.from({ length: 8 }, (_, i) => ({ kind: "plantTag" as const, x: 38 + (i % 4) * 2, y: 9 + Math.floor(i / 4) * 2, room: "clone" })),
+  { kind: "humidifier", x: 45, y: 6, room: "clone" },
+  { kind: "fan", x: 45, y: 8, room: "clone" },
+  { kind: "humidifier", x: 45, y: 11, room: "clone" },
+  { kind: "mat", x: 40, y: 12, w: 2, room: "clone" },
+  ...Array.from({ length: 12 }, (_, i) => ({ kind: "plantTag" as const, x: 49 + (i % 6) * 2, y: 9 + Math.floor(i / 6) * 2, room: "mother" })),
+  { kind: "fan", x: 60, y: 7, room: "mother" },
+  { kind: "humidifier", x: 60, y: 11, room: "mother" },
+  { kind: "mat", x: 53, y: 12, w: 2, room: "mother" },
+  { kind: "fan", x: 47, y: 18, room: "grow1" },
+  { kind: "humidifier", x: 47, y: 22, room: "grow1" },
+  { kind: "mat", x: 41, y: 23, w: 2, room: "grow1" },
+  { kind: "fan", x: 60, y: 18, room: "grow2" },
+  { kind: "humidifier", x: 60, y: 22, room: "grow2" },
+  { kind: "mat", x: 54, y: 23, w: 2, room: "grow2" },
+  { kind: "fan", x: 76, y: 18, room: "grow3" },
+  { kind: "humidifier", x: 76, y: 22, room: "grow3" },
+  { kind: "mat", x: 70, y: 23, w: 2, room: "grow3" },
+  { kind: "fan", x: 89, y: 18, room: "grow4" },
+  { kind: "humidifier", x: 89, y: 22, room: "grow4" },
+  { kind: "mat", x: 83, y: 23, w: 2, room: "grow4" },
+  // Dry rooms / server bays
+  { kind: "decal", variant: "cable", x: 22, y: 29, w: 8, room: "soil" },
+  { kind: "decal", variant: "cable", x: 8, y: 29, w: 7, room: "vmCreations" },
+  { kind: "bin", x: 17, y: 37, room: "vmCreations" },
+  { kind: "bin", x: 31, y: 37, room: "soil" },
+  { kind: "mat", x: 27, y: 26, w: 2, room: "soil" },
+  { kind: "mat", x: 13, y: 26, w: 2, room: "vmCreations" },
+  // Potting and cultivation manager
+  { kind: "bin", x: 46, y: 36, room: "potting" },
+  { kind: "box", x: 37, y: 37, room: "potting" },
+  { kind: "scale", x: 38, y: 37, room: "potting" },
+  { kind: "mat", x: 40, y: 30, w: 2, room: "potting" },
+  { kind: "rug", variant: "blue", x: 50, y: 33, w: 7, h: 5, room: "cultMgr" },
+  { kind: "cabinet", x: 49, y: 31, h: 2, room: "cultMgr" },
+  { kind: "bin", x: 58, y: 36, room: "cultMgr" },
+  { kind: "mat", x: 53, y: 30, w: 2, room: "cultMgr" },
+  // Processing line
+  { kind: "scale", x: 68, y: 4, room: "trim" },
+  { kind: "bin", x: 66, y: 12, room: "trim" },
+  { kind: "box", x: 80, y: 11, room: "trim" },
+  { kind: "box", x: 81, y: 11, room: "trim" },
+  { kind: "mat", x: 72, y: 12, w: 2, room: "trim" },
+  { kind: "decal", variant: "hazard", x: 66, y: 9, w: 16, room: "trim" },
+  { kind: "scale", x: 85, y: 10, room: "pack" },
+  { kind: "printer", x: 92, y: 10, room: "pack" },
+  { kind: "box", x: 85, y: 12, room: "pack" },
+  { kind: "box", x: 92, y: 12, room: "pack" },
+  { kind: "mat", x: 87, y: 12, w: 2, room: "pack" },
+  { kind: "hood", x: 102, y: 10, w: 2, room: "extract" },
+  { kind: "condenser", x: 105, y: 5, h: 2, room: "extract" },
+  { kind: "condenser", x: 105, y: 8, h: 2, room: "extract" },
+  { kind: "glassware", x: 104, y: 12, room: "extract" },
+  { kind: "decal", variant: "hazard", x: 96, y: 9, w: 10, room: "extract" },
+  { kind: "mat", x: 99, y: 12, w: 2, room: "extract" },
+  // Security and operations
+  { kind: "desk", x: 111, y: 10, w: 7, room: "security" },
+  { kind: "cabinet", x: 118, y: 6, h: 2, room: "security" },
+  { kind: "bin", x: 118, y: 13, room: "security" },
+  { kind: "mat", x: 113, y: 14, w: 2, room: "security" },
+  { kind: "rug", variant: "blue", x: 99, y: 19, w: 5, h: 4, room: "ops" },
+  { kind: "cabinet", x: 98, y: 20, h: 2, room: "ops" },
+  { kind: "printer", x: 107, y: 20, room: "ops" },
+  { kind: "bin", x: 108, y: 19, room: "ops" },
+  { kind: "mat", x: 103, y: 23, w: 2, room: "ops" },
+  // Break room
+  { kind: "vending", x: 70, y: 28, w: 2, h: 2, room: "break" },
+  { kind: "rug", variant: "green", x: 70, y: 31, w: 6, h: 5, room: "break" },
+  { kind: "rug", variant: "brown", x: 78, y: 31, w: 6, h: 5, room: "break" },
+  { kind: "sofa", x: 68, y: 36, w: 4, room: "break" },
+  { kind: "bench", x: 82, y: 37, w: 3, room: "break" },
+  { kind: "bin", x: 85, y: 30, room: "break" },
+  { kind: "bin", x: 85, y: 35, room: "break" },
+  { kind: "plant", x: 67, y: 35, room: "break" },
+  { kind: "mat", x: 74, y: 28, w: 2, room: "break" },
+  { kind: "decal", variant: "stain", x: 77, y: 30, room: "break" },
+  // Bathrooms
+  { kind: "bin", x: 94, y: 37, room: "bath" },
+  { kind: "bin", x: 88, y: 37, room: "bath" },
+  { kind: "poster", variant: "mirror", x: 95, y: 31, room: "bath" },
+  { kind: "poster", variant: "mirror", x: 95, y: 34, room: "bath" },
+  { kind: "mat", x: 90, y: 28, w: 2, room: "bath" },
+  // Screening lobby
+  { kind: "bench", x: 101, y: 28, w: 3, room: "screen" },
+  { kind: "bench", x: 100, y: 36, w: 2, room: "screen" },
+  { kind: "stanchion", x: 101, y: 31, room: "screen" },
+  { kind: "stanchion", x: 101, y: 34, room: "screen" },
+  { kind: "rug", variant: "red", x: 100, y: 32, w: 1, h: 2, room: "screen" },
+  { kind: "plant", x: 110, y: 28, room: "screen" },
+  { kind: "bin", x: 110, y: 37, room: "screen" },
+  // Maintenance closet
+  { kind: "bin", x: 114, y: 30, room: "maintenanceRoom" },
+  { kind: "cabinet", x: 114, y: 27, h: 2, room: "maintenanceRoom" },
+  { kind: "mat", x: 114, y: 22, w: 2, room: "maintenanceRoom" },
+  // Loading dock and warehouse
+  { kind: "decal", variant: "hazard", x: 97, y: 46, w: 21, room: "dock" },
+  { kind: "box", x: 97, y: 43, room: "dock" },
+  { kind: "box", x: 98, y: 43, room: "dock" },
+  { kind: "box", x: 97, y: 45, room: "dock" },
+  { kind: "bench", x: 115, y: 45, w: 2, room: "dock" },
+  { kind: "cabinet", x: 117, y: 43, h: 2, room: "dock" },
+  { kind: "mat", x: 106, y: 43, w: 2, room: "dock" },
+  { kind: "box", x: 97, y: 52, room: "warehouse" },
+  { kind: "box", x: 97, y: 53, room: "warehouse" },
+  { kind: "box", x: 98, y: 53, room: "warehouse" },
+  { kind: "box", x: 117, y: 52, room: "warehouse" },
+  { kind: "box", x: 117, y: 53, room: "warehouse" },
+  { kind: "decal", variant: "lane", x: 99, y: 54, w: 18, room: "warehouse" },
+  { kind: "decal", variant: "lane", x: 99, y: 52, w: 18, room: "warehouse" },
+  { kind: "bin", x: 97, y: 58, room: "warehouse" },
+  { kind: "mat", x: 106, y: 49, w: 2, room: "warehouse" },
+  // Sales showroom
+  { kind: "rug", variant: "blue", x: 22, y: 48, w: 14, h: 6, room: "sales" },
+  { kind: "display", x: 28, y: 44, w: 2, room: "sales" },
+  { kind: "display", x: 31, y: 44, w: 2, room: "sales" },
+  { kind: "sofa", x: 18, y: 53, w: 3, room: "sales" },
+  { kind: "cabinet", x: 17, y: 44, h: 2, room: "sales" },
+  { kind: "bin", x: 40, y: 55, room: "sales" },
+  { kind: "mat", x: 26, y: 43, w: 2, room: "sales" },
+  // R&D labs
+  { kind: "centrifuge", x: 58, y: 46, room: "rd1" },
+  { kind: "microscope", x: 62, y: 46, room: "rd1" },
+  { kind: "glassware", x: 66, y: 46, room: "rd1" },
+  { kind: "glassware", x: 67, y: 46, room: "rd1" },
+  { kind: "hood", x: 53, y: 52, w: 2, room: "rd1" },
+  { kind: "decal", variant: "hazard", x: 55, y: 47, w: 8, room: "rd1" },
+  { kind: "mat", x: 60, y: 43, w: 2, room: "rd1" },
+  { kind: "centrifuge", x: 76, y: 46, room: "rd2" },
+  { kind: "microscope", x: 80, y: 46, room: "rd2" },
+  { kind: "glassware", x: 86, y: 46, room: "rd2" },
+  { kind: "glassware", x: 88, y: 46, room: "rd2" },
+  { kind: "hood", x: 83, y: 52, w: 2, room: "rd2" },
+  { kind: "cabinet", x: 72, y: 51, h: 2, room: "rd2" },
+  { kind: "decal", variant: "hazard", x: 75, y: 47, w: 8, room: "rd2" },
+  { kind: "mat", x: 81, y: 43, w: 2, room: "rd2" },
+];
+
+// Corridor furniture sits against room walls and never in front of a door.
+const hallwayProps: Gen2Prop[] = [
+  { kind: "plant", x: 44, y: 14 },
+  { kind: "waterStation", x: 57, y: 14 },
+  { kind: "bench", x: 67, y: 14, w: 3 },
+  { kind: "bin", x: 70, y: 14 },
+  { kind: "extinguisher", x: 78, y: 14 },
+  { kind: "plant", x: 83, y: 14 },
+  { kind: "bench", x: 93, y: 14, w: 3 },
+  { kind: "waterStation", x: 104, y: 14 },
+  { kind: "bin", x: 108, y: 14 },
+  { kind: "bench", x: 45, y: 25, w: 3 },
+  { kind: "bench", x: 58, y: 25, w: 3 },
+  { kind: "plant", x: 66, y: 25 },
+  { kind: "bench", x: 75, y: 25, w: 3 },
+  { kind: "extinguisher", x: 88, y: 25 },
+  { kind: "plant", x: 34, y: 39 },
+  { kind: "waterStation", x: 45, y: 39 },
+  { kind: "bench", x: 62, y: 39, w: 3 },
+  { kind: "bin", x: 70, y: 39 },
+  { kind: "plant", x: 100, y: 39 },
+  { kind: "bench", x: 40, y: 41, w: 3 },
+  { kind: "plant", x: 50, y: 41 },
+  { kind: "waterStation", x: 66, y: 41 },
+  { kind: "bin", x: 75, y: 41 },
+  { kind: "bench", x: 92, y: 41, w: 3 },
+  { kind: "extinguisher", x: 56, y: 41 },
+  { kind: "decal", variant: "lane", x: 28, y: 40, w: 88 },
+  { kind: "decal", variant: "lane", x: 40, y: 26, w: 65 },
+  // Wall-mounted fire extinguisher cabinets on bottom walls facing corridors
+  { kind: "extCabinet", x: 44, y: 13, room: "clone" },
+  { kind: "extCabinet", x: 58, y: 13, room: "mother" },
+  { kind: "extCabinet", x: 77, y: 13, room: "trim" },
+  { kind: "extCabinet", x: 91, y: 13, room: "pack" },
+  { kind: "extCabinet", x: 103, y: 13, room: "extract" },
+  { kind: "extCabinet", x: 46, y: 24, room: "grow1" },
+  { kind: "extCabinet", x: 58, y: 24, room: "grow2" },
+  { kind: "extCabinet", x: 75, y: 24, room: "grow3" },
+  { kind: "extCabinet", x: 88, y: 24, room: "grow4" },
+  { kind: "extCabinet", x: 44, y: 38, room: "potting" },
+  { kind: "extCabinet", x: 57, y: 38, room: "cultMgr" },
+  { kind: "extCabinet", x: 80, y: 38, room: "break" },
+];
+
+const decorProps: Gen2Prop[] = [...buildScuffs(), ...sceneryProps, ...buildWallDecor(), ...hallwayProps];
+
+/** Scenery-pass props, exposed so layout checks can compare against the pre-scenery floor plan. */
+export const gen2DecorProps: ReadonlyArray<Gen2Prop> = decorProps;
+
 export const gen2Props: Gen2Prop[] = [
   ...vmRoomProps,
   ...baseGen2Props.filter((prop) => prop.room !== "soil").map(shiftProp),
+  ...decorProps,
 ];
 
 const baseGen2Npcs: Gen2Npc[] = [

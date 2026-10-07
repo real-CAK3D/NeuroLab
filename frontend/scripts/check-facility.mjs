@@ -9,7 +9,7 @@ mkdirSync(workdir, { recursive: true });
 const entry = join(workdir, 'facility-check-entry.ts');
 const outfile = join(workdir, 'facility-check-entry.mjs');
 
-writeFileSync(entry, String.raw`import { GEN2_H, GEN2_W, gen2Hallways, gen2Npcs, gen2Props, gen2Rooms, type Gen2Prop, type Gen2Room } from '../../src/game/gen2FacilityData';
+writeFileSync(entry, String.raw`import { GEN2_H, GEN2_W, gen2PropBlocksMovement, gen2Hallways, gen2Npcs, gen2Props, gen2Rooms, type Gen2Prop, type Gen2Room } from '../../src/game/gen2FacilityData';
 
 const failures: string[] = [];
 const warnings: string[] = [];
@@ -41,9 +41,7 @@ function cellsForDoor(room: Gen2Room, door: Gen2Room['doors'][number]) {
   if (door.side === 'right') pushRect(room.x + room.w - 2, room.y + door.at, 3, size);
   return cells;
 }
-function propBlocksMovement(prop: Gen2Prop) {
-  return !['monitor', 'growLight', 'pipe', 'irrigation', 'whiteboard', 'sealedDoor'].includes(prop.kind);
-}
+const propBlocksMovement = gen2PropBlocksMovement;
 function nearestRoomForProp(prop: Gen2Prop) {
   const propRect = rect(prop);
   return gen2Rooms.find((room) => containsRect(rect(room), propRect));
@@ -85,7 +83,7 @@ for (const [index, prop] of gen2Props.entries()) {
   if (prop.room && !roomIds.has(prop.room)) failures.push(tag + ' references missing room ' + prop.room);
   const container = prop.room ? gen2Rooms.find((room) => room.id === prop.room) : nearestRoomForProp(prop);
   if (prop.room && container && !containsRect(rect(container), propRect)) failures.push(tag + ' is outside declared room ' + prop.room);
-  if (!prop.room && !container) warnings.push(tag + ' is not inside any room and has no room id');
+  if (!prop.room && !container && !hallwayTiles.has(String(prop.x) + ',' + String(prop.y))) warnings.push(tag + ' is not inside any room and has no room id');
   if (propBlocksMovement(prop) && propRect.w * propRect.h > 32) warnings.push(tag + ' blocks ' + (propRect.w * propRect.h) + ' tiles; confirm routes avoid it');
 }
 

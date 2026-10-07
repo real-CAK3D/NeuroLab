@@ -3,12 +3,14 @@ import { Router as createRouter } from "express";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
+import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { promisify } from "node:util";
 import { appConfig, createIntercomMessageSchema, createTaskSchema } from "../../../shared/index";
 import { db } from "../database/db";
 import { employeesQuery, reportsQuery, roomsQuery, tasksQuery } from "../database/queries";
 import { eventBus } from "../events/bus";
+import { generateShiftReport, latestShiftReport, readHistory } from "../services/monitoring";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,8 +18,78 @@ const execFileAsync = promisify(execFile);
 const SUMMARY_TTL_MS = 3000;
 let summaryCache: { at: number; value: unknown } | undefined;
 
+export async function computeSummary() {
+  if (summaryCache && Date.now() - summaryCache.at < SUMMARY_TTL_MS) return summaryCache.value as Awaited<ReturnType<typeof buildSummary>>;
+  const payload = await buildSummary();
+  summaryCache = { at: Date.now(), value: payload };
+  return payload;
+}
+
+async function buildSummary() {
+  const [services, devices, cpu] = await Promise.all([probeServices(), readFacilityDevices(), sampleCpuUsage()]);
+  const count = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n;
+  const total = os.totalmem();
+  const lastEvent = db.prepare("SELECT type, message, created_at FROM events ORDER BY id DESC LIMIT 1").get() as { type: string; message: string; created_at: string } | undefined;
+  const lastAlert = db.prepare("SELECT level, title, created_at FROM alerts ORDER BY id DESC LIMIT 1").get() as { level: string; title: string; created_at: string } | undefined;
+  const online = devices.filter((device) => device.online).length;
+  const servicesDown = services.filter((service) => !service.ok).length;
+  const payload = {
+    ok: servicesDown === 0,
+    service: "neurolab",
+    sampledAt: new Date().toISOString(),
+    tick: services.find((service) => service.id === "websocket")?.tick ?? null,
+    facility: {
+      employees: count("SELECT COUNT(*) AS n FROM employees"),
+      rooms: count("SELECT COUNT(*) AS n FROM rooms"),
+      departments: count("SELECT COUNT(*) AS n FROM departments"),
+      tasks: {
+        open: count("SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ('COMPLETED', 'CANCELLED')"),
+        queued: count("SELECT COUNT(*) AS n FROM tasks WHERE status = 'QUEUED'"),
+        completed: count("SELECT COUNT(*) AS n FROM tasks WHERE status = 'COMPLETED'"),
+      },
+      alerts: {
+        total: count("SELECT COUNT(*) AS n FROM alerts"),
+        critical: count("SELECT COUNT(*) AS n FROM alerts WHERE UPPER(level) = 'CRITICAL'"),
+        last: lastAlert ?? null,
+      },
+      lastEvent: lastEvent ?? null,
+    },
+    services,
+    host: {
+      hostname: os.hostname(),
+      cpuPercent: cpu.usedPercent,
+      memoryPercent: Math.round(((total - os.freemem()) / total) * 100),
+      uptimeSeconds: Math.round(os.uptime()),
+    },
+    telemetry: {
+      online,
+      total: devices.length,
+      stale: devices.filter((device) => device.stale).length,
+      devices: devices.map((device) => ({
+        id: device.id,
+        name: device.displayName,
+        online: device.online,
+        temperatureC: device.temperatureC,
+        cpuPercent: device.cpuPercent,
+        memoryPercent: device.memoryPercent,
+      })),
+    },
+  };
+  return payload;
+}
+
 export function apiRouter(): Router {
   const router = createRouter();
+
+  // Optional write protection: set NEUROLAB_WRITE_TOKEN to require "Authorization: Bearer <token>" on every non-GET call.
+  router.use((req: Request, res: Response, next) => {
+    const token = process.env.NEUROLAB_WRITE_TOKEN;
+    if (!token || ["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+    const given = Buffer.from((req.headers.authorization ?? "").replace(/^Bearer\s+/i, ""));
+    const expected = Buffer.from(token);
+    if (given.length === expected.length && timingSafeEqual(given, expected)) return next();
+    res.status(401).json({ error: "Write token required" });
+  });
 
   router.get("/bootstrap", (_req: Request, res: Response) => {
     res.json({
@@ -232,60 +304,22 @@ export function apiRouter(): Router {
     });
   });
 
-  // Compact, read-only rollup used by external dashboards (e.g. Space-Ghost's Systems tab).
+  router.get("/history", (req: Request, res: Response) => {
+    const minutes = Math.min(7 * 24 * 60, Math.max(5, Number(req.query.minutes) || 120));
+    res.json({ minutes, samples: readHistory(minutes) });
+  });
+
+  router.get("/shift-report", (_req: Request, res: Response) => {
+    res.json({ latest: latestShiftReport() });
+  });
+
+  router.post("/shift-report", async (_req: Request, res: Response) => {
+    res.status(201).json(await generateShiftReport(computeSummary, "manual"));
+  });
+
+  // Compact, read-only rollup used by external dashboards (e.g. Space-Ghost's Household Signals link).
   router.get("/summary", async (_req: Request, res: Response) => {
-    if (summaryCache && Date.now() - summaryCache.at < SUMMARY_TTL_MS) return res.json(summaryCache.value);
-    const [services, devices, cpu] = await Promise.all([probeServices(), readFacilityDevices(), sampleCpuUsage()]);
-    const count = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n;
-    const total = os.totalmem();
-    const lastEvent = db.prepare("SELECT type, message, created_at FROM events ORDER BY id DESC LIMIT 1").get() as { type: string; message: string; created_at: string } | undefined;
-    const lastAlert = db.prepare("SELECT level, title, created_at FROM alerts ORDER BY id DESC LIMIT 1").get() as { level: string; title: string; created_at: string } | undefined;
-    const online = devices.filter((device) => device.online).length;
-    const servicesDown = services.filter((service) => !service.ok).length;
-    const payload = {
-      ok: servicesDown === 0,
-      service: "neurolab",
-      sampledAt: new Date().toISOString(),
-      tick: services.find((service) => service.id === "websocket")?.tick ?? null,
-      facility: {
-        employees: count("SELECT COUNT(*) AS n FROM employees"),
-        rooms: count("SELECT COUNT(*) AS n FROM rooms"),
-        departments: count("SELECT COUNT(*) AS n FROM departments"),
-        tasks: {
-          open: count("SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ('COMPLETED', 'CANCELLED')"),
-          queued: count("SELECT COUNT(*) AS n FROM tasks WHERE status = 'QUEUED'"),
-          completed: count("SELECT COUNT(*) AS n FROM tasks WHERE status = 'COMPLETED'"),
-        },
-        alerts: {
-          total: count("SELECT COUNT(*) AS n FROM alerts"),
-          critical: count("SELECT COUNT(*) AS n FROM alerts WHERE UPPER(level) = 'CRITICAL'"),
-          last: lastAlert ?? null,
-        },
-        lastEvent: lastEvent ?? null,
-      },
-      services,
-      host: {
-        hostname: os.hostname(),
-        cpuPercent: cpu.usedPercent,
-        memoryPercent: Math.round(((total - os.freemem()) / total) * 100),
-        uptimeSeconds: Math.round(os.uptime()),
-      },
-      telemetry: {
-        online,
-        total: devices.length,
-        stale: devices.filter((device) => device.stale).length,
-        devices: devices.map((device) => ({
-          id: device.id,
-          name: device.displayName,
-          online: device.online,
-          temperatureC: device.temperatureC,
-          cpuPercent: device.cpuPercent,
-          memoryPercent: device.memoryPercent,
-        })),
-      },
-    };
-    summaryCache = { at: Date.now(), value: payload };
-    res.json(payload);
+    res.json(await computeSummary());
   });
 
   router.post("/tasks", (req: Request, res: Response) => {

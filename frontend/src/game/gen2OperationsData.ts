@@ -708,3 +708,193 @@ export const gen2BossHotKeys: Gen2HotKey[] = [
 ];
 
 export const gen2ReportLogPath = "docs/gen2-wo-report-log.md";
+
+// ---------------------------------------------------------------------------
+// Sims-style autonomy: personality-driven jitter, needs rates and chatter.
+// ---------------------------------------------------------------------------
+
+export type Gen2BreakFavorite = "coffee" | "water" | "fridge" | "microwave" | "sit" | "phone";
+
+export type Gen2SimTrait = {
+  /** Chance per tick that a walking sprite actually takes a step (0.75-1). */
+  pace: number;
+  /** Multiplier applied to pause lengths at route stops. */
+  pauseScale: number;
+  /** How readily this worker starts conversations (0.3-1.8). */
+  chatty: number;
+  /** Need drift multipliers. */
+  energyRate: number;
+  socialRate: number;
+  hungerRate: number;
+  bladderRate: number;
+  /** Chance multiplier for taking a scenic detour between rooms. */
+  wander: number;
+  favorite: Gen2BreakFavorite;
+};
+
+export function gen2Hash01(id: string, salt = ""): number {
+  let hash = 2166136261;
+  const text = `${id}:${salt}`;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return ((hash >>> 0) % 10000) / 10000;
+}
+
+const gen2SimTraitOverrides: Record<string, Partial<Gen2SimTrait>> = {
+  salesRep: { chatty: 1.8, wander: 1.8, pace: 0.98, favorite: "coffee" },
+  salesAssistant: { chatty: 1.3, favorite: "phone" },
+  bossSecretary: { chatty: 1.1, pace: 0.97 },
+  secretary: { chatty: 1.5 },
+  screenHr: { chatty: 1.2, favorite: "water" },
+  security: { chatty: 0.35, pace: 1, wander: 0.4 },
+  patrol: { chatty: 0.45, pace: 1, wander: 1.4 },
+  boss: { chatty: 0.2, pace: 0.95 },
+  grow2Worker: { energyRate: 1.45, favorite: "coffee" },
+  grow3Worker: { energyRate: 1.25, chatty: 1.1 },
+  processor4: { pace: 0.92, pauseScale: 0.7, favorite: "phone" },
+  maintenance: { pace: 0.82, pauseScale: 1.3, favorite: "water", wander: 1.6, bladderRate: 0.8 },
+  extractor: { chatty: 0.55, favorite: "water" },
+  researcher: { favorite: "coffee", energyRate: 1.2 },
+  rdSafety: { chatty: 0.8 },
+  cultManager: { chatty: 1.0, favorite: "coffee" },
+  opsManager: { chatty: 0.9 },
+  logistics: { pace: 0.96, pauseScale: 0.9 },
+  soilWorker: { pace: 0.85, pauseScale: 1.25 },
+};
+
+const gen2SimFavorites: Gen2BreakFavorite[] = ["coffee", "water", "fridge", "microwave", "sit", "phone"];
+
+export function gen2SimTraitFor(id: string): Gen2SimTrait {
+  const base: Gen2SimTrait = {
+    pace: 0.82 + gen2Hash01(id, "pace") * 0.17,
+    pauseScale: 0.7 + gen2Hash01(id, "pause") * 0.8,
+    chatty: 0.55 + gen2Hash01(id, "chat") * 1.0,
+    energyRate: 0.8 + gen2Hash01(id, "energy") * 0.5,
+    socialRate: 0.75 + gen2Hash01(id, "social") * 0.6,
+    hungerRate: 0.8 + gen2Hash01(id, "hunger") * 0.5,
+    bladderRate: 0.8 + gen2Hash01(id, "bladder") * 0.5,
+    wander: 0.6 + gen2Hash01(id, "wander") * 1.0,
+    favorite: gen2SimFavorites[Math.floor(gen2Hash01(id, "fav") * gen2SimFavorites.length) % gen2SimFavorites.length],
+  };
+  return { ...base, ...(gen2SimTraitOverrides[id] ?? {}) };
+}
+
+/** Short lines (<= ~22 chars) so the 6px bubbles stay readable. */
+export const gen2ChatTopics = {
+  workByDepartment: {
+    Cultivation: ["TRAYS LOOK GREAT", "WATER LINES ARE FULL", "CLONES ROOTED EARLY", "NEED MORE POTS", "CANOPY IS FILLING IN", "CHECKED THE PH TWICE"],
+    Processing: ["TRIM QUEUE IS LONG", "LABELS RUNNING LOW", "BATCH WENT OUT CLEAN", "CONVEYOR WAS STICKY", "MORE CRATES PLEASE", "PROCESS LIST IS QUIET"],
+    Research: ["MODEL RAN 20% FASTER", "TEST BATCH PASSED", "NEW SAMPLE IN THE LAB", "LOGGING TOKENS/SEC", "OLLAMA LOADED A MODEL"],
+    Security: ["CAMS ALL CLEAR", "ALL DOORS LOCKED", "NOTHING ON PATROL", "HALLS ARE QUIET"],
+    Logistics: ["WO PACKETS SORTED", "ARCHIVE IS UP TO DATE", "SIGNED THE HANDOFF", "TIMESTAMPS MATCH"],
+    Operations: ["DOCKER LOOKS HEALTHY", "NOTES ARE FILED", "LISTS ARE IN", "REPORT DUE SOON"],
+    Sales: ["CLIENT WANTS SAMPLES", "NEW PITCH IDEA", "STOCK IS MOVING", "DEMO IS READY"],
+    Maintenance: ["MOPPED THE HALLWAY", "RESTOCKED THE SOAP", "FIXED A STUCK DOOR", "BULB WAS OUT"],
+    Executive: ["REPORTS ARE IN", "DEBRIEF AT SIX", "OWNER WANTS NOTES"],
+    "Grow Ops": ["NEW HIRE PAPERWORK", "BADGES ARE READY", "FILING ALL DAY"],
+  } as Record<string, string[]>,
+  joke: ["MY PLANT IS TALLER", "THIS COFFEE IS SOUP", "I SPEAK FLUENT BEEP", "DID YOU TURN IT OFF", "BEEP BOOP, BOSS", "I AM 80% COFFEE"],
+  gripe: ["THE FRIDGE IS EMPTY", "WHO TOOK MY MUG", "THE FAN IS LOUD", "MY FEET HURT", "TOO MANY ALERTS", "MEETING AGAIN?"],
+  gossip: ["HEARD DAN IS TESTING", "THE BOSS IS IN A MOOD", "NEW HIRE COMING?", "THEY MOVED THE DESKS", "GIGI NEEDS A RAISE", "KNOX SAW NOTHING"],
+  reply: ["HA, TRUE", "SAME HERE", "NO WAY", "TELL ME ABOUT IT", "I HEARD THAT TOO", "LOL OK", "ROUGH", "BACK TO WORK?", "FAIR POINT", "YEP YEP"],
+  breakRoom: ["WHO WANTS COFFEE", "ANY SNACKS LEFT", "THIS MICROWAVE SMELLS", "SIT FOR A MINUTE"],
+  fireDrill: ["R&D FIRE DRILL AGAIN", "KEEP EXTINGUISHER CLOSE", "SMOKE TEST WAS LOUD"],
+  telemetryByRoom: {
+    grow1: ["GROW 1 RUNS WARM", "BAK3RY IS SPIKING"],
+    grow2: ["GROW 2 CPU IS HIGH", "HACK-SAFE RUNNING HOT"],
+    grow3: ["GROW 3 RUNS HOT!", "GROW 3 IS YELLOWING"],
+    grow4: ["GROW 4 STILL EMPTY", "NO FEED IN GROW 4"],
+    clone: ["CLONE LAPTOP IS WARM", "CLONE RH IS DRIFTING"],
+    mother: ["NUKEBOX FANS ARE LOUD", "MOTHER ROOM IS BUSY"],
+    soil: ["GARDEN VM IS BUSY", "SWAP IS CREEPING UP"],
+    vmCreations: ["CREATIONS VM: NO FEED", "VAULT STILL PENDING"],
+    ops: ["DOCKER IS BUSY TODAY", "CONTAINERS RESTARTED"],
+    rd1: ["OLLAMA LAG TODAY", "MODEL QUEUE IS BACKED UP"],
+    rd2: ["TERMINALS ARE SLOW", "SSH TARGET WENT AWAY"],
+    trim: ["TRIM QUEUE IS BACKED UP"],
+    extract: ["EXTRACTOR TEMP IS UP"],
+    sales: ["HOST CPU IS HOT"],
+  } as Record<string, string[]>,
+};
+
+// ---------------------------------------------------------------------------
+// Work schedules. Times are minutes since midnight on the facility clock,
+// which simply follows the browser's wall-clock time of day.
+// Defaults come from gen2DefaultSchedule(); edits are stored on the staff
+// record (Grow Ops > Staff > SCHEDULE) in localStorage.
+// ---------------------------------------------------------------------------
+
+export type Gen2BreakSlot = { id: "morning" | "lunch" | "afternoon"; label: string; start: number; length: number };
+export type Gen2Schedule = { shiftStart: number; shiftEnd: number; breaks: Gen2BreakSlot[] };
+export type Gen2ScheduleBlock = { kind: "WORKING" | "BREAK" | "SHIFT END"; label: string; nextBreakLabel: string };
+
+export const GEN2_BREAK_GRACE_MINUTES = 12;
+
+const DEPARTMENT_BREAK_OFFSET: Record<string, number> = {
+  Cultivation: 0, Processing: 15, Research: 30, Security: 45, Logistics: 20, Operations: 10, Sales: 25, Maintenance: 35, Executive: 5, "Grow Ops": 40,
+};
+
+export function gen2FormatClock(minutes: number): string {
+  const total = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+export function gen2ParseClock(value: string, fallback: number): number {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return fallback;
+  const hours = Number(match[1]);
+  const mins = Number(match[2]);
+  if (hours > 24 || mins > 59 || (hours === 24 && mins > 0)) return fallback;
+  return hours * 60 + mins;
+}
+
+export function gen2DefaultSchedule(id: string, department: string): Gen2Schedule {
+  const offset = (DEPARTMENT_BREAK_OFFSET[department] ?? 0) + Math.floor(gen2Hash01(id, "break-offset") * 50);
+  const allDay = department === "Security" || id === "maintenance" || id === "logistics";
+  return {
+    shiftStart: allDay ? 0 : 6 * 60 + Math.floor(gen2Hash01(id, "shift-start") * 4) * 15,
+    shiftEnd: allDay ? 1440 : 21 * 60 + Math.floor(gen2Hash01(id, "shift-end") * 5) * 15,
+    breaks: [
+      { id: "morning", label: "MORNING BREAK", start: 9 * 60 + 15 + offset, length: 10 },
+      { id: "lunch", label: "LUNCH", start: 11 * 60 + 45 + offset, length: 30 },
+      { id: "afternoon", label: "AFTERNOON BREAK", start: 14 * 60 + 45 + offset, length: 10 },
+    ],
+  };
+}
+
+export function gen2NormalizeSchedule(value: unknown, id: string, department: string): Gen2Schedule {
+  const fallback = gen2DefaultSchedule(id, department);
+  const raw = value as Partial<Gen2Schedule> | undefined;
+  if (!raw || typeof raw !== "object") return fallback;
+  const clampMin = (input: unknown, def: number, max = 1440) => (Number.isFinite(input) ? Math.max(0, Math.min(max, Math.round(Number(input)))) : def);
+  const breaks = fallback.breaks.map((slot) => {
+    const stored = Array.isArray(raw.breaks) ? (raw.breaks.find((item) => item?.id === slot.id) as Partial<Gen2BreakSlot> | undefined) : undefined;
+    return { ...slot, start: clampMin(stored?.start, slot.start, 1439), length: Math.max(0, Math.min(90, clampMin(stored?.length, slot.length, 90))) };
+  });
+  return { shiftStart: clampMin(raw.shiftStart, fallback.shiftStart), shiftEnd: clampMin(raw.shiftEnd, fallback.shiftEnd), breaks };
+}
+
+export function gen2OnShift(schedule: Gen2Schedule, minute: number): boolean {
+  const { shiftStart: start, shiftEnd: end } = schedule;
+  if (start === end) return true;
+  return start < end ? minute >= start && minute < end : minute >= start || minute < end;
+}
+
+/** Break slot whose start window (start .. start + grace) contains the minute, if any. */
+export function gen2BreakWindowAt(schedule: Gen2Schedule, minute: number): Gen2BreakSlot | undefined {
+  return schedule.breaks.find((slot) => slot.length > 0 && ((minute - slot.start + 1440) % 1440) < Math.max(slot.length, GEN2_BREAK_GRACE_MINUTES) + 1);
+}
+
+export function gen2ScheduleBlock(schedule: Gen2Schedule, minute: number, onBreakNow: boolean): Gen2ScheduleBlock {
+  const upcoming = [...schedule.breaks]
+    .filter((slot) => slot.length > 0)
+    .map((slot) => ({ slot, wait: (slot.start - minute + 1440) % 1440 }))
+    .sort((a, b) => a.wait - b.wait)[0];
+  const nextBreakLabel = upcoming ? `${gen2FormatClock(upcoming.slot.start)} ${upcoming.slot.label}` : "NONE";
+  if (!gen2OnShift(schedule, minute)) return { kind: "SHIFT END", label: `OFF SHIFT UNTIL ${gen2FormatClock(schedule.shiftStart)}`, nextBreakLabel };
+  if (onBreakNow) return { kind: "BREAK", label: "ON BREAK", nextBreakLabel };
+  const allDay = schedule.shiftStart === schedule.shiftEnd || (schedule.shiftStart === 0 && schedule.shiftEnd >= 1440);
+  return { kind: "WORKING", label: allDay ? "24H SHIFT" : `UNTIL ${gen2FormatClock(schedule.shiftEnd)}`, nextBreakLabel };
+}

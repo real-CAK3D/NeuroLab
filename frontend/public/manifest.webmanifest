@@ -1,0 +1,12 @@
+{
+  "name": "NeuroLab",
+  "short_name": "NeuroLab",
+  "description": "Retro facility dashboard for the NukeBox home lab",
+  "start_url": "/#gen2",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#2f3130",
+  "theme_color": "#2f3130",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

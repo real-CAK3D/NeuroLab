@@ -5,6 +5,7 @@ import {
   GEN2_W,
   gen2Hallways,
   gen2Npcs,
+  gen2PropBlocksMovement,
   gen2Props,
   gen2Rooms,
   type Gen2Direction,
@@ -13,7 +14,7 @@ import {
   type Gen2Prop,
   type Gen2Room,
 } from "../game/gen2FacilityData";
-import { gen2BossHotKeys, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital } from "../game/gen2OperationsData";
+import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
 import {
   applyActivityStateSnapshot,
@@ -69,10 +70,57 @@ type ActivityControl = "seed-packaging" | "force-extraction" | "force-rd-pass" |
 type ActivityScenario = "normal-shift" | "rd-failure-storm" | "sales-push" | "manager-sweep";
 type ActivityRoomBadge = { label: string; tone: "ready" | "warn" | "busy" };
 
+type NpcNeeds = { energy: number; social: number; hunger: number; bladder: number };
+type ErrandKind = "coffee" | "water" | "fridge" | "microwave" | "bathroom" | "sit" | "phone" | "desk" | "seek" | "work";
+type NpcErrand = {
+  kind: ErrandKind;
+  x: number;
+  y: number;
+  face?: Gen2Direction;
+  seat?: boolean;
+  stage: "go" | "use";
+  left: number;
+  timeout: number;
+  partnerId?: string;
+};
+type NpcChat = { with: string; left: number; say: string; side: "l" | "r" };
+type NpcSim = {
+  needs: NpcNeeds;
+  errand?: NpcErrand;
+  chat?: NpcChat;
+  chatCd: number;
+  errandCd: number;
+  recent: Record<string, number>;
+  via?: { x: number; y: number };
+  legFor: number;
+  /** "work": hop between stations in the home room. "trip": walk the production/handoff route once. */
+  mode: "work" | "trip";
+  tripIdx: number;
+  tripCd: number;
+  /** Break window already used, as "day:slot". */
+  lastBreak: string;
+  /** Absolute minute (epoch minutes) until which the worker is on a scheduled break. */
+  breakUntil: number;
+  breakRetry: number;
+};
+type NpcSimContext = {
+  incidentPhase: number;
+  stress: Record<string, number>;
+  hot: string[];
+  alerts: number;
+  schedules: Record<string, Gen2Schedule>;
+  homes: Record<string, string>;
+  /** Facility clock: minute of day (fractional), epoch minutes, local day number. */
+  minute: number;
+  abs: number;
+  day: number;
+};
+
 type LiveNpc = Gen2Npc & {
   routeIndex: number;
   stepFrame: 0 | 1 | 2;
   pause: number;
+  sim?: NpcSim;
 };
 
 type GrowOpsStaff = {
@@ -95,6 +143,8 @@ type GrowOpsStaff = {
   hatColor: string;
   shoeColor: string;
   custom: boolean;
+  /** Shift hours and break slots (minutes since midnight). */
+  schedule?: Gen2Schedule;
 };
 
 type VacantDuty = {
@@ -166,7 +216,7 @@ type RoomVitals = Record<string, LiveRoomVital>;
 const worldWidth = GEN2_W * GEN2_TILE;
 const worldHeight = GEN2_H * GEN2_TILE;
 const MOVEMENT_TICK_MS = 430;
-const NPC_STORAGE_KEY = "gen2-facility-npcs-v4";
+const NPC_STORAGE_KEY = "gen2-facility-npcs-v6";
 const STAFF_STORAGE_KEY = "gen2-grow-ops-staff-v1";
 const DUTY_STORAGE_KEY = "gen2-grow-ops-vacant-duties-v2";
 const FACILITY_DRAFT_STORAGE_KEY = "gen2-grow-ops-facility-drafts-v1";
@@ -215,6 +265,7 @@ export function Gen2FacilityDashboard() {
   const [isSavingActivity, setIsSavingActivity] = useState(false);
   const [activityLabOpen, setActivityLabOpen] = useState(false);
   const [intercomNotice, setIntercomNotice] = useState("INTERCOM STANDBY — route arrivals and manual lab controls will appear here.");
+  const [clockText, setClockText] = useState(() => gen2FormatClock(clockMinuteNow()));
   const [productionPhase, setProductionPhase] = useState(0);
   const [incidentPhase, setIncidentPhase] = useState(0);
   const [incidentTargetRoom, setIncidentTargetRoom] = useState<"rd1" | "rd2">("rd1");
@@ -227,6 +278,7 @@ export function Gen2FacilityDashboard() {
   const roomVitals = useMemo(() => buildLiveRoomVitals(hostStats, dockerStats, ollamaModels, facilityDevices), [hostStats, dockerStats, ollamaModels, facilityDevices]);
   const [activityState, setActivityState] = useState<ActivityState>(() => loadPersistedActivityState(npcs));
   const previousNpcRoomsRef = useRef<Record<string, string | undefined>>(roomMapForNpcs(npcs));
+  const simContextRef = useRef<NpcSimContext>(EMPTY_SIM_CONTEXT);
 
   useLayoutEffect(() => {
     function fitBoard() {
@@ -245,12 +297,19 @@ export function Gen2FacilityDashboard() {
     return () => window.removeEventListener("resize", fitBoard);
   }, []);
 
+  simContextRef.current = useMemo(() => buildSimContext(roomVitals, incidentPhase, staff), [roomVitals, incidentPhase, staff]);
+
   useEffect(() => {
     const interval = window.setInterval(() => {
-      setNpcs((current) => advanceAllNpcs(current, walkable));
+      setNpcs((current) => advanceAllNpcs(current, walkable, simContextRef.current, Date.now()));
     }, MOVEMENT_TICK_MS);
     return () => window.clearInterval(interval);
   }, [walkable]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const interval = window.setInterval(() => setProductionPhase((current) => (current + 1) % 6), 3200);
@@ -540,6 +599,7 @@ export function Gen2FacilityDashboard() {
             <span>RETRO OVERWORLD DASHBOARD</span>
           </div>
           <div className="gb-stats">
+            <span>CLOCK {clockText}</span>
             <span>{gen2Rooms.length} ROOMS</span>
             <span>{npcs.length} STAFF</span>
             <span>{Object.keys(gen2RoomOperations).length} JOBS</span>
@@ -1052,6 +1112,16 @@ function GrowOpsPanel({
     setDraft((current) => ({ ...current, [key]: value }));
   }
 
+  const schedule = draft.schedule ?? gen2DefaultSchedule(draft.id, draft.department);
+  const [clockText, setClockText] = useState(() => gen2FormatClock(clockMinuteNow()));
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
+    return () => window.clearInterval(interval);
+  }, []);
+  function setSchedule(next: Gen2Schedule) {
+    setField("schedule", next);
+  }
+
   useEffect(() => {
     let active = true;
     getStaffConfigSnapshot()
@@ -1177,6 +1247,21 @@ function GrowOpsPanel({
             <label>SHOE COLOR<input type="color" value={draft.shoeColor} onChange={(event) => setField("shoeColor", event.target.value)} /></label>
             <label className="grow-ops-wide">CURRENT ACTION<input value={draft.currentAction} onChange={(event) => setField("currentAction", event.target.value)} maxLength={54} /></label>
             <label className="grow-ops-wide">PERSONALITY<input value={draft.personality} onChange={(event) => setField("personality", event.target.value)} maxLength={72} /></label>
+          </div>
+          <div className="grow-ops-schedule">
+            <strong>SCHEDULE <em>FACILITY CLOCK {clockText}</em></strong>
+            <div className="grow-ops-grid">
+              <label>SHIFT START<input type="time" value={gen2FormatClock(schedule.shiftStart)} onChange={(event) => setSchedule({ ...schedule, shiftStart: gen2ParseClock(event.target.value, schedule.shiftStart) })} /></label>
+              <label>SHIFT END<input type="time" value={gen2FormatClock(schedule.shiftEnd)} onChange={(event) => setSchedule({ ...schedule, shiftEnd: gen2ParseClock(event.target.value, schedule.shiftEnd) })} /></label>
+              {schedule.breaks.map((slot) => (
+                <div className="grow-ops-break-slot" key={slot.id}>
+                  <span>{slot.label}</span>
+                  <label>START<input type="time" value={gen2FormatClock(slot.start)} onChange={(event) => setSchedule({ ...schedule, breaks: schedule.breaks.map((item) => item.id === slot.id ? { ...item, start: gen2ParseClock(event.target.value, item.start) } : item) })} /></label>
+                  <label>MIN<input type="number" min={0} max={90} value={slot.length} onChange={(event) => setSchedule({ ...schedule, breaks: schedule.breaks.map((item) => item.id === slot.id ? { ...item, length: Math.max(0, Math.min(90, Number(event.target.value) || 0)) } : item) })} /></label>
+                </div>
+              ))}
+            </div>
+            <span className="grow-ops-schedule-note">SHIFT 00:00-00:00 = ALL DAY. BREAKS WAIT UP TO 12 MIN IF THE BREAK ROOM IS FULL (MAX 3).</span>
           </div>
           <div className="grow-ops-actions">
             <button type="submit" disabled={isApplyingStaff}>SAVE</button>
@@ -1616,7 +1701,8 @@ function PropView({
   return (
     <button
       type="button"
-      className={`gen2-prop prop-${prop.kind} ${isStressedPlant(source, roomVitals) ? "is-stressed-plant" : ""} ${environmentClass(source, roomVitals, incidentPhase, incidentTargetRoom)} ${productionClass(source, productionPhase, incidentPhase, incidentTargetRoom)} ${detail ? "is-detail-prop" : ""}`}
+      data-label={prop.label}
+      className={`gen2-prop prop-${prop.kind} ${prop.variant ? `variant-${prop.variant}` : ""} ${isStressedPlant(source, roomVitals) ? "is-stressed-plant" : ""} ${environmentClass(source, roomVitals, incidentPhase, incidentTargetRoom)} ${productionClass(source, productionPhase, incidentPhase, incidentTargetRoom)} ${detail ? "is-detail-prop" : ""}`}
       style={{ left: prop.x * GEN2_TILE, top: prop.y * GEN2_TILE, width: w, height: h }}
       onClick={(event) => {
         event.stopPropagation();
@@ -1671,6 +1757,13 @@ function NpcView({
 }) {
   const source = originalNpc ?? npc;
   const cargo = visibleCargo(source, incidentPhase);
+  const chat = source.sim?.chat;
+  const errand = source.sim?.errand;
+  const seated = !!errand && errand.stage === "use" && !!errand.seat;
+  const bubbleText = incidentBubble(source, incidentPhase, incidentTargetRoom)
+    ?? chat?.say
+    ?? (errand?.stage === "use" ? ERRAND_TAGS[errand.kind] : undefined)
+    ?? (npc.pause > 0 ? moodBubble(source, staff) : "");
 
   return (
     <button
@@ -1696,8 +1789,8 @@ function NpcView({
       }
     >
       {selected ? <span className="gen2-route-marker" /> : null}
-      {(incidentBubble(source, incidentPhase, incidentTargetRoom) ?? (npc.pause > 0 ? moodBubble(source, staff) : "")) ? <span className="gen2-bubble">{incidentBubble(source, incidentPhase, incidentTargetRoom) ?? moodBubble(source, staff)}</span> : null}
-      <span className={`gen2-npc role-${source.role} face-${npc.dir} step-${npc.stepFrame} activity-${npcActivity(source)}`} style={staffStyle(staff)} />
+      {bubbleText ? <span className={`gen2-bubble ${chat ? `is-chat chat-${chat.side}` : ""}`}>{bubbleText}</span> : null}
+      <span className={`gen2-npc role-${source.role} face-${npc.dir} step-${npc.stepFrame} activity-${npcActivity(source)} ${seated ? "is-seated" : ""}`} style={staffStyle(staff)} />
       {cargo ? <span className={`npc-cargo cargo-${cargo}`} /> : null}
     </button>
   );
@@ -2065,6 +2158,7 @@ function defaultGrowOpsStaff(npc: Gen2Npc): GrowOpsStaff {
     hatColor: color,
     shoeColor: color,
     custom: false,
+    schedule: gen2DefaultSchedule(npc.id, profile?.department ?? humanizeNpcId(npc.role)),
   };
 }
 
@@ -2098,6 +2192,7 @@ function cleanGrowOpsStaff(staff: GrowOpsStaff): GrowOpsStaff {
     breakPolicy: staff.breakPolicy?.trim() || "Breaks rotate around department coverage.",
     hatColor: normalizeHexColor(staff.hatColor, roleColor(staff.role)),
     shoeColor: normalizeHexColor(staff.shoeColor, normalizeHexColor(staff.hatColor, roleColor(staff.role))),
+    schedule: gen2NormalizeSchedule(staff.schedule, staff.id, staff.department.trim() || "Grow Ops"),
   };
 }
 
@@ -2113,6 +2208,7 @@ function createScreeningHire(staff: GrowOpsStaff, duty?: LiveNpc): LiveNpc {
       routeIndex: 0,
       stepFrame: 0,
       pause: 2,
+      sim: createSim(staff.id),
     };
   }
   return {
@@ -2124,6 +2220,7 @@ function createScreeningHire(staff: GrowOpsStaff, duty?: LiveNpc): LiveNpc {
     routeIndex: 0,
     stepFrame: 0,
     pause: 2,
+    sim: createSim(staff.id),
     route: [
       { x: 96, y: 34, face: "left", pause: 2 },
       { x: 92, y: 34, face: "left" },
@@ -2161,7 +2258,7 @@ function humanizeNpcId(value: string) {
 
 function loadPersistedNpcs(): LiveNpc[] {
   const walkable = buildWalkable();
-  const initial = sanitizeNpcs(gen2Npcs.map((npc) => ({ ...npc, routeIndex: 0, stepFrame: 0 as const, pause: 0 })), walkable);
+  const initial = sanitizeNpcs(gen2Npcs.map((npc) => ({ ...npc, routeIndex: 0, stepFrame: 0 as const, pause: Math.floor(gen2Hash01(npc.id, "start") * 16), sim: createSim(npc.id) })), walkable);
   if (typeof window === "undefined") return initial;
   try {
     const stored = window.localStorage.getItem(NPC_STORAGE_KEY);
@@ -2182,6 +2279,7 @@ function loadPersistedNpcs(): LiveNpc[] {
         routeIndex: Number.isFinite(storedNpc.routeIndex) ? storedNpc.routeIndex % base.route.length : 0,
         stepFrame,
         pause: Number.isFinite(storedNpc.pause) ? storedNpc.pause : 0,
+        sim: coerceSim(storedNpc.sim, base.id),
       };
     });
     const custom: LiveNpc[] = parsed.npcs
@@ -2194,12 +2292,15 @@ function loadPersistedNpcs(): LiveNpc[] {
           routeIndex: npc.route.length ? Math.abs(npc.routeIndex) % npc.route.length : 0,
           stepFrame,
           pause: Number.isFinite(npc.pause) ? npc.pause : 0,
+          sim: coerceSim(npc.sim, npc.id),
         };
       });
     hydrated = [...hydrated, ...custom];
     const elapsedTicks = parsed.savedAt ? Math.min(2000, Math.floor((Date.now() - parsed.savedAt) / MOVEMENT_TICK_MS)) : 0;
     hydrated = sanitizeNpcs(hydrated, walkable);
-    for (let index = 0; index < elapsedTicks; index += 1) hydrated = advanceAllNpcs(hydrated, walkable);
+    const replayStart = Date.now() - elapsedTicks * MOVEMENT_TICK_MS;
+    const replayContext = buildSimContext({}, 0, loadGrowOpsStaff());
+    for (let index = 0; index < elapsedTicks; index += 1) hydrated = advanceAllNpcs(hydrated, walkable, replayContext, replayStart + index * MOVEMENT_TICK_MS);
     return sanitizeNpcs(hydrated, walkable);
   } catch {
     return initial;
@@ -2218,7 +2319,8 @@ function isStoredLiveNpc(npc: LiveNpc) {
 
 function sanitizeNpcs(npcs: LiveNpc[], walkable: Set<string>) {
   return npcs.map((npc) => {
-    const safePosition = nearestWalkableGoal({ x: npc.x, y: npc.y }, walkable, 18) ?? firstWalkableRouteTile(npc, walkable) ?? { x: npc.x, y: npc.y };
+    const seated = !!npc.sim?.errand?.seat && npc.sim.errand.stage === "use" && npc.sim.errand.x === npc.x && npc.sim.errand.y === npc.y;
+    const safePosition = (seated ? { x: npc.x, y: npc.y } : undefined) ?? nearestWalkableGoal({ x: npc.x, y: npc.y }, walkable, 18) ?? firstWalkableRouteTile(npc, walkable) ?? { x: npc.x, y: npc.y };
     const route = npc.route.map((step) => nearestWalkableGoal(step, walkable, 6) ? step : { ...step, ...(nearestWalkableGoal(step, walkable, 18) ?? { x: safePosition.x, y: safePosition.y }) });
     const routeIndex = route.length ? Math.abs(npc.routeIndex) % route.length : 0;
     return { ...npc, x: safePosition.x, y: safePosition.y, route, routeIndex };
@@ -2241,48 +2343,635 @@ function persistNpcs(npcs: LiveNpc[]) {
   window.localStorage.setItem(NPC_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), npcs: sanitizeNpcs(npcs, walkable), removedBaseIds }));
 }
 
-function advanceAllNpcs(npcs: LiveNpc[], walkable: Set<string>) {
-  return npcs.map((npc) => advanceNpc(npc, walkable, npcs));
+const EMPTY_SIM_CONTEXT: NpcSimContext = { incidentPhase: 0, stress: {}, hot: [], alerts: 0, schedules: {}, homes: {}, minute: 12 * 60, abs: 0, day: 0 };
+
+function buildSimContext(vitals: RoomVitals, incidentPhase: number, staff: Record<string, GrowOpsStaff>): NpcSimContext {
+  const stress: Record<string, number> = {};
+  const hot: string[] = [];
+  let alerts = 0;
+  for (const [roomId, vital] of Object.entries(vitals)) {
+    if (vital.status === "ALERT") {
+      stress[roomId] = 2;
+      hot.push(roomId);
+      alerts += 1;
+    } else if (vital.status === "WATCH") {
+      stress[roomId] = 1;
+      hot.push(roomId);
+    }
+  }
+  const schedules: Record<string, Gen2Schedule> = {};
+  const homes: Record<string, string> = {};
+  for (const [id, member] of Object.entries(staff)) {
+    if (member.schedule) schedules[id] = member.schedule;
+    if (member.stationRoomId) homes[id] = member.stationRoomId;
+  }
+  return { ...EMPTY_SIM_CONTEXT, incidentPhase, stress, hot, alerts, schedules, homes };
 }
 
-function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[]): LiveNpc {
-  if (npc.pause > 0) return { ...npc, pause: npc.pause - 1, stepFrame: 0 };
-  let target = npc.route[npc.routeIndex];
-  if (!target) return npc;
-  if (target && isBathroomTile(target.x, target.y) && !isBathroomTile(npc.x, npc.y) && bathroomOccupied(allNpcs, npc.id)) {
-    const routeIndex = nextRouteIndex(npc, allNpcs);
-    target = npc.route[routeIndex];
-    return { ...npc, routeIndex, pause: 1, stepFrame: 0 };
-  }
-  if (target && isBreakRoomTile(target.x, target.y) && !isBreakRoomTile(npc.x, npc.y) && breakRoomCount(allNpcs, npc.id) >= 3) {
-    const routeIndex = nextRouteIndex(npc, allNpcs);
-    target = npc.route[routeIndex];
-    return { ...npc, routeIndex, pause: 1, stepFrame: 0 };
-  }
-  const routedTarget = nearestWalkableGoal(target, walkable) ?? target;
-  if (npc.x === routedTarget.x && npc.y === routedTarget.y) {
-    return { ...npc, dir: target.face ?? npc.dir, routeIndex: nextRouteIndex(npc, allNpcs), pause: target.pause ?? randomPause(npc), stepFrame: 0 };
-  }
-
-  const next = nextStep({ x: npc.x, y: npc.y }, target, walkable);
-  if (!next) return { ...npc, pause: 1, stepFrame: 0 };
-  const dir = directionTo(npc.x, npc.y, next.x, next.y);
-  return { ...npc, x: next.x, y: next.y, dir, stepFrame: npc.stepFrame === 1 ? 2 : 1 };
+/** Facility clock follows the browser's wall clock. */
+function withClock(ctx: NpcSimContext, now: number): NpcSimContext {
+  const date = new Date(now);
+  return {
+    ...ctx,
+    minute: date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60,
+    abs: Math.floor(now / 60000),
+    day: Math.floor((now - date.getTimezoneOffset() * 60000) / 86400000),
+  };
 }
 
-function nextRouteIndex(npc: LiveNpc, allNpcs: LiveNpc[]) {
-  if (npc.route.length < 2) return 0;
-  const bathroomIsOccupied = bathroomOccupied(allNpcs, npc.id) && !isBathroomTile(npc.x, npc.y);
-  const breakRoomIsFull = breakRoomCount(allNpcs, npc.id) >= 3 && !isBreakRoomTile(npc.x, npc.y);
-  const candidates = npc.route
-    .map((_, index) => index)
-    .filter((index) => index !== npc.routeIndex)
-    .filter((index) => !bathroomIsOccupied || !isBathroomTile(npc.route[index].x, npc.route[index].y))
-    .filter((index) => !breakRoomIsFull || !isBreakRoomTile(npc.route[index].x, npc.route[index].y));
-  if (!candidates.length) return (npc.routeIndex + 1) % npc.route.length;
-  let next = candidates[Math.floor(Math.random() * candidates.length)];
-  if (next === npc.routeIndex) next = (next + 1) % npc.route.length;
-  return next;
+function clockMinuteNow() {
+  const date = new Date();
+  return date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
+}
+
+// ---------------------------------------------------------------------------
+// Sims-style autonomy: scheduled breaks, station-hopping work, occasional trips
+// ---------------------------------------------------------------------------
+
+const MANAGER_IDS = new Set(["cultManager", "opsManager", "salesRep"]);
+const BATHROOM_THRESHOLD = 78;
+const DESPERATE_THRESHOLD = 96;
+const WORK_KINDS: Gen2Prop["kind"][] = ["desk", "terminal", "table", "trimTable", "rack", "machine", "vat", "plantBed", "tray", "plant", "cutPlant", "dryRack", "shelf", "crate", "barrel", "sack", "soil", "conveyor", "experiment", "centrifuge", "microscope", "glassware", "scale", "printer", "hood", "display", "pottingMix", "cabinet", "condenser", "humidifier", "fan"];
+const BREAK_ROOM_WORK_KINDS: Gen2Prop["kind"][] = ["fridge", "coffee", "microwave", "waterStation", "vending", "table"];
+
+type Spot = { x: number; y: number; face: Gen2Direction; roomId?: string; seat?: boolean };
+type Stations = {
+  coffee: Spot[];
+  water: Spot[];
+  fridge: Spot[];
+  microwave: Spot[];
+  bathroom: Spot[];
+  breakSeat: Spot[];
+  workSpots: Record<string, Spot[]>;
+  hallTiles: Array<{ x: number; y: number }>;
+};
+
+let stationCache: Stations | undefined;
+const favoriteSpotCache = new Map<string, Spot[]>();
+
+function tileKey(x: number, y: number) {
+  return `${x},${y}`;
+}
+
+function floodReachable(walkable: Set<string>) {
+  const start = gen2Hallways.length ? { x: gen2Hallways[2]?.x ?? gen2Hallways[0].x, y: gen2Hallways[2]?.y ?? gen2Hallways[0].y } : undefined;
+  const seen = new Set<string>();
+  const seed = start ? nearestWalkableGoal(start, walkable, 8) : undefined;
+  if (!seed) return walkable;
+  const queue = [seed];
+  seen.add(tileKey(seed.x, seed.y));
+  for (let head = 0; head < queue.length; head += 1) {
+    const current = queue[head];
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const key = tileKey(current.x + dx, current.y + dy);
+      if (seen.has(key) || !walkable.has(key)) continue;
+      seen.add(key);
+      queue.push({ x: current.x + dx, y: current.y + dy });
+    }
+  }
+  return seen;
+}
+
+function getStations(): Stations {
+  if (stationCache) return stationCache;
+  const walkable = buildWalkable();
+  const reach = floodReachable(walkable);
+  const propCovers = (prop: Gen2Prop, x: number, y: number) => x >= prop.x && x < prop.x + (prop.w ?? 1) && y >= prop.y && y < prop.y + (prop.h ?? 1);
+  const adjacent = (kinds: Gen2Prop["kind"][], roomId: string): Spot[] => {
+    const spots = new Map<string, Spot>();
+    for (const prop of gen2Props.filter((item) => kinds.includes(item.kind) && item.room === roomId)) {
+      for (let y = prop.y; y < prop.y + (prop.h ?? 1); y += 1) {
+        for (let x = prop.x; x < prop.x + (prop.w ?? 1); x += 1) {
+          const around: Array<[number, number, Gen2Direction]> = [[0, 1, "up"], [0, -1, "down"], [-1, 0, "right"], [1, 0, "left"]];
+          for (const [dx, dy, face] of around) {
+            const sx = x + dx;
+            const sy = y + dy;
+            const key = tileKey(sx, sy);
+            if (propCovers(prop, sx, sy) || !reach.has(key) || roomAt(sx, sy)?.id !== roomId) continue;
+            if (!spots.has(key)) spots.set(key, { x: sx, y: sy, face, roomId });
+          }
+        }
+      }
+    }
+    return [...spots.values()];
+  };
+  const tableLike = (x: number, y: number) => gen2Props.some((prop) => ["desk", "table", "trimTable", "terminal"].includes(prop.kind) && propCovers(prop, x, y));
+  const chairSpots = (roomId: string): Spot[] => gen2Props
+    .filter((prop) => prop.kind === "chair" && prop.room === roomId)
+    .filter((prop) => [[0, 1], [0, -1], [1, 0], [-1, 0]].some(([dx, dy]) => reach.has(tileKey(prop.x + dx, prop.y + dy))))
+    .map((prop) => {
+      const face: Gen2Direction = tableLike(prop.x, prop.y - 1) ? "up" : tableLike(prop.x - 1, prop.y) ? "left" : tableLike(prop.x + 1, prop.y) ? "right" : tableLike(prop.x, prop.y + 1) ? "down" : "up";
+      return { x: prop.x, y: prop.y, face, roomId, seat: true };
+    });
+  const workSpots: Record<string, Spot[]> = {};
+  for (const room of gen2Rooms) {
+    if (room.id === "bath") continue;
+    const kinds = room.id === "break" ? BREAK_ROOM_WORK_KINDS : WORK_KINDS;
+    const spots = [...(room.id === "break" ? [] : chairSpots(room.id)), ...adjacent(kinds, room.id)];
+    if (spots.length) workSpots[room.id] = spots;
+  }
+  const hallTiles: Array<{ x: number; y: number }> = [];
+  for (const key of reach) {
+    const [x, y] = key.split(",").map(Number);
+    if (!roomAt(x, y)) hallTiles.push({ x, y });
+  }
+  stationCache = {
+    coffee: adjacent(["coffee"], "break"),
+    water: adjacent(["waterStation"], "break"),
+    fridge: adjacent(["fridge"], "break"),
+    microwave: adjacent(["microwave"], "break"),
+    bathroom: adjacent(["urinal", "sink"], "bath"),
+    breakSeat: chairSpots("break"),
+    workSpots,
+    hallTiles,
+  };
+  return stationCache;
+}
+
+/** A worker's personal "territory": one chair (if any) plus a few other stations in the room, stable per worker. */
+function favoriteSpots(id: string, roomId: string): Spot[] {
+  const cacheKey = `${id}@${roomId}`;
+  const cached = favoriteSpotCache.get(cacheKey);
+  if (cached) return cached;
+  const all = getStations().workSpots[roomId] ?? [];
+  const ranked = [...all].sort((a, b) => gen2Hash01(id, tileKey(a.x, a.y)) - gen2Hash01(id, tileKey(b.x, b.y)));
+  const seat = ranked.find((spot) => spot.seat);
+  const others = ranked.filter((spot) => spot !== seat).slice(0, seat ? 3 : 4);
+  const picked = seat ? [seat, ...others] : others;
+  favoriteSpotCache.set(cacheKey, picked);
+  return picked;
+}
+
+function homeRoomOf(npc: LiveNpc, ctx: NpcSimContext) {
+  return ctx.homes[npc.id] ?? gen2WorkerProfiles[npc.id]?.stationRoomId ?? roomAt(npc.route[0]?.x ?? npc.x, npc.route[0]?.y ?? npc.y)?.id;
+}
+
+function tripCooldown(npc: LiveNpc) {
+  const range = (min: number, max: number) => Math.round((min + Math.random() * (max - min)) * 140);
+  if (npc.id === "boss") return range(2, 4);
+  if (MANAGER_IDS.has(npc.id)) return range(2.5, 5);
+  if (npc.id === "patrol") return range(1.5, 3);
+  if (npc.id === "security") return range(4, 7);
+  if (npc.id === "maintenance") return range(1.2, 2.5);
+  if (npc.role === "secretary") return range(3, 5);
+  if (npc.role === "logistics") return range(3, 5);
+  if (npc.role === "processing" || npc.role === "science") return range(3, 6);
+  if (npc.role === "cultivation") return range(5, 10);
+  return range(5, 9);
+}
+
+function createSim(id: string): NpcSim {
+  return {
+    needs: {
+      energy: 5 + gen2Hash01(id, "n-energy") * 45,
+      social: 10 + gen2Hash01(id, "n-social") * 50,
+      hunger: gen2Hash01(id, "n-hunger") * 40,
+      bladder: gen2Hash01(id, "n-bladder") * 45,
+    },
+    chatCd: Math.floor(gen2Hash01(id, "n-chatcd") * 25),
+    errandCd: Math.floor(gen2Hash01(id, "n-errcd") * 40),
+    recent: {},
+    legFor: -1,
+    mode: "work",
+    tripIdx: 0,
+    tripCd: 60 + Math.floor(gen2Hash01(id, "n-trip") * 600),
+    lastBreak: "",
+    breakUntil: 0,
+    breakRetry: 0,
+  };
+}
+
+function finiteOr(value: unknown, fallback: number, min = 0, max = 100) {
+  return Number.isFinite(value) ? Math.max(min, Math.min(max, Number(value))) : fallback;
+}
+
+const ERRAND_KINDS: ErrandKind[] = ["coffee", "water", "fridge", "microwave", "bathroom", "sit", "phone", "desk", "seek", "work"];
+const DIRECTIONS: Gen2Direction[] = ["down", "up", "left", "right"];
+
+function coerceSim(value: unknown, id: string): NpcSim {
+  const fallback = createSim(id);
+  const raw = value as Partial<NpcSim> | undefined;
+  if (!raw || typeof raw !== "object") return fallback;
+  const needs = (raw.needs ?? {}) as Partial<NpcNeeds>;
+  const errand = raw.errand as Partial<NpcErrand> | undefined;
+  const chat = raw.chat as Partial<NpcChat> | undefined;
+  const recent: Record<string, number> = {};
+  if (raw.recent && typeof raw.recent === "object") {
+    for (const [key, ticks] of Object.entries(raw.recent)) if (Number.isFinite(ticks) && Number(ticks) > 0) recent[key] = Math.min(600, Number(ticks));
+  }
+  return {
+    needs: {
+      energy: finiteOr(needs.energy, fallback.needs.energy),
+      social: finiteOr(needs.social, fallback.needs.social),
+      hunger: finiteOr(needs.hunger, fallback.needs.hunger),
+      bladder: finiteOr(needs.bladder, fallback.needs.bladder),
+    },
+    errand: errand && ERRAND_KINDS.includes(errand.kind as ErrandKind) && Number.isFinite(errand.x) && Number.isFinite(errand.y)
+      ? {
+        kind: errand.kind as ErrandKind,
+        x: Number(errand.x),
+        y: Number(errand.y),
+        face: DIRECTIONS.includes(errand.face as Gen2Direction) ? errand.face : undefined,
+        seat: !!errand.seat,
+        stage: "go",
+        left: finiteOr(errand.left, 8, 0, 900),
+        timeout: finiteOr(errand.timeout, 60, 0, 120),
+        partnerId: typeof errand.partnerId === "string" ? errand.partnerId : undefined,
+      }
+      : undefined,
+    chat: chat && typeof chat.with === "string" && typeof chat.say === "string"
+      ? { with: chat.with, left: finiteOr(chat.left, 4, 0, 30), say: chat.say.slice(0, 40), side: chat.side === "r" ? "r" : "l" }
+      : undefined,
+    chatCd: finiteOr(raw.chatCd, 0, 0, 600),
+    errandCd: finiteOr(raw.errandCd, 0, 0, 300),
+    recent,
+    legFor: -1,
+    mode: raw.mode === "trip" ? "trip" : "work",
+    tripIdx: finiteOr(raw.tripIdx, 0, 0, 200),
+    tripCd: finiteOr(raw.tripCd, fallback.tripCd, 0, 6000),
+    lastBreak: typeof raw.lastBreak === "string" ? raw.lastBreak.slice(0, 24) : "",
+    breakUntil: Number.isFinite(raw.breakUntil) ? Number(raw.breakUntil) : 0,
+    breakRetry: finiteOr(raw.breakRetry, 0, 0, 60),
+  };
+}
+
+function isCriticalNow(npc: LiveNpc, ctx: NpcSimContext) {
+  const incident = ctx.incidentPhase >= 13 && ctx.incidentPhase <= 15;
+  if (incident && ["security", "patrol", "researcher", "rdSafety"].includes(npc.id)) return true;
+  return false;
+}
+
+function isAutonomousWorker(npc: LiveNpc) {
+  return npc.role !== "boss" && npc.role !== "secretary" && npc.role !== "security" && !MANAGER_IDS.has(npc.id);
+}
+
+function departmentOf(npc: LiveNpc) {
+  return gen2WorkerProfiles[npc.id]?.department ?? npc.role;
+}
+
+function scheduleOf(npc: LiveNpc, ctx: NpcSimContext): Gen2Schedule {
+  return ctx.schedules[npc.id] ?? gen2DefaultSchedule(npc.id, departmentOf(npc));
+}
+
+function isOnBreak(npc: LiveNpc, ctx: NpcSimContext) {
+  return !!npc.sim && npc.sim.breakUntil > ctx.abs && gen2OnShift(scheduleOf(npc, ctx), ctx.minute);
+}
+
+/** How likely a conversation is, given where the pair is. 0 = never. */
+function chatSetting(a: LiveNpc, b: LiveNpc, ctx: NpcSimContext) {
+  const roomId = roomAt(a.x, a.y)?.id;
+  if (roomId === "break" || isOnBreak(a, ctx) || isOnBreak(b, ctx)) return 1;
+  const homeA = homeRoomOf(a, ctx);
+  const homeB = homeRoomOf(b, ctx);
+  if (roomId && ((homeA !== roomId && homeB === roomId) || (homeB !== roomId && homeA === roomId))) return 0.9;
+  if (roomId && homeA === roomId && homeB === roomId) return 0.3;
+  return 0.25;
+}
+
+function chatAvailable(npc: LiveNpc, ctx: NpcSimContext) {
+  if (npc.id === "boss") return false;
+  const sim = npc.sim;
+  if (!sim || sim.chat || sim.chatCd > 0) return false;
+  if (!gen2OnShift(scheduleOf(npc, ctx), ctx.minute)) return false;
+  if (isCriticalNow(npc, ctx) || visibleCargo(npc, ctx.incidentPhase)) return false;
+  if (isBathroomTile(npc.x, npc.y)) return false;
+  if (sim.errand && sim.errand.stage !== "use" && sim.errand.kind !== "seek") return false;
+  return true;
+}
+
+function npcName(id: string) {
+  return gen2WorkerIdentity[id]?.name ?? humanizeNpcId(id);
+}
+
+function faceToward(from: { x: number; y: number }, to: { x: number; y: number }, fallback: Gen2Direction): Gen2Direction {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (dx === 0 && dy === 0) return fallback;
+  if (Math.abs(dx) >= Math.abs(dy)) return dx > 0 ? "right" : "left";
+  return dy > 0 ? "down" : "up";
+}
+
+function pick<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function buildChatLines(a: LiveNpc, b: LiveNpc, ctx: NpcSimContext): [string, string] {
+  const topics = gen2ChatTopics;
+  const roomId = roomAt(a.x, a.y)?.id;
+  const options: string[] = [];
+  const deptA = departmentOf(a);
+  options.push(...(topics.workByDepartment[deptA] ?? topics.workByDepartment.Operations));
+  options.push(...topics.joke, ...topics.gripe, ...topics.gossip);
+  if (roomId === "break") options.push(...topics.breakRoom, ...topics.breakRoom);
+  const hotLines = ctx.hot.flatMap((id) => topics.telemetryByRoom[id] ?? []);
+  if (hotLines.length) options.push(...hotLines, ...hotLines);
+  if (a.role === "science" || b.role === "science" || a.role === "security") options.push(...topics.fireDrill);
+  return [pick(options), pick(topics.reply)];
+}
+
+function startChats(list: LiveNpc[], ctx: NpcSimContext): LiveNpc[] {
+  let out = list;
+  const used = new Set<string>();
+  for (let i = 0; i < list.length; i += 1) {
+    const a = out[i];
+    if (used.has(a.id) || !chatAvailable(a, ctx)) continue;
+    const roomA = roomAt(a.x, a.y)?.id;
+    for (let j = i + 1; j < list.length; j += 1) {
+      const b = out[j];
+      if (used.has(b.id) || !chatAvailable(b, ctx)) continue;
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      if (dx * dx + dy * dy > (roomA === "break" ? 10 : 5)) continue;
+      if (roomAt(b.x, b.y)?.id !== roomA) continue;
+      const simA = a.sim as NpcSim;
+      const simB = b.sim as NpcSim;
+      if (simA.recent[b.id] || simB.recent[a.id]) continue;
+      const chatty = (gen2SimTraitFor(a.id).chatty + gen2SimTraitFor(b.id).chatty) / 2;
+      const wantsChat = simA.needs.social >= 55 || simB.needs.social >= 55;
+      const chance = Math.min(0.9, 0.2 * chatty * (wantsChat ? 2.2 : 1) * chatSetting(a, b, ctx));
+      if (Math.random() > chance) continue;
+      const [lineA, lineB] = buildChatLines(a, b, ctx);
+      const sideA: "l" | "r" = a.x < b.x ? "l" : a.x > b.x ? "r" : a.id < b.id ? "l" : "r";
+      const length = 7 + Math.floor(Math.random() * 6);
+      const startA: NpcSim = { ...simA, errand: simA.errand?.stage === "use" ? simA.errand : undefined, chat: { with: b.id, left: length, say: lineA, side: sideA }, recent: { ...simA.recent, [b.id]: 420 } };
+      const startB: NpcSim = { ...simB, errand: simB.errand?.stage === "use" ? simB.errand : undefined, chat: { with: a.id, left: length, say: lineB, side: sideA === "l" ? "r" : "l" }, recent: { ...simB.recent, [a.id]: 420 } };
+      if (out === list) out = list.slice();
+      out[i] = { ...a, dir: faceToward(a, b, a.dir), stepFrame: 0, sim: startA };
+      out[j] = { ...b, dir: faceToward(b, a, b.dir), stepFrame: 0, sim: startB };
+      used.add(a.id);
+      used.add(b.id);
+      break;
+    }
+  }
+  return out;
+}
+
+function advanceAllNpcs(npcs: LiveNpc[], walkable: Set<string>, baseCtx: NpcSimContext = EMPTY_SIM_CONTEXT, now: number = Date.now()) {
+  const ctx = withClock(baseCtx, now);
+  const next = npcs.slice();
+  for (let index = 0; index < next.length; index += 1) next[index] = advanceNpc(next[index], walkable, next, ctx);
+  return startChats(next, ctx);
+}
+
+function tickSim(sim: NpcSim, npc: LiveNpc, ctx: NpcSimContext): NpcSim {
+  const trait = gen2SimTraitFor(npc.id);
+  const roomId = roomAt(npc.x, npc.y)?.id;
+  const stationId = gen2WorkerProfiles[npc.id]?.stationRoomId;
+  const stress = Math.max(roomId ? ctx.stress[roomId] ?? 0 : 0, stationId ? (ctx.stress[stationId] ?? 0) * 0.6 : 0);
+  const resting = sim.errand?.stage === "use" && (sim.errand.kind === "sit" || sim.errand.kind === "phone");
+  const needs: NpcNeeds = {
+    energy: Math.min(100, sim.needs.energy + 0.16 * trait.energyRate * (1 + stress * 0.7) * (resting ? 0.2 : 1)),
+    social: Math.min(100, sim.needs.social + 0.2 * trait.socialRate),
+    hunger: Math.min(100, sim.needs.hunger + 0.11 * trait.hungerRate),
+    bladder: Math.min(100, sim.needs.bladder + 0.09 * trait.bladderRate),
+  };
+  let recent = sim.recent;
+  const keys = Object.keys(recent);
+  if (keys.length) {
+    recent = {};
+    for (const key of keys) if (sim.recent[key] > 1) recent[key] = sim.recent[key] - 1;
+  }
+  return { ...sim, needs, recent, chatCd: Math.max(0, sim.chatCd - 1), errandCd: Math.max(0, sim.errandCd - 1), tripCd: Math.max(0, sim.tripCd - 1), breakRetry: Math.max(0, sim.breakRetry - 1) };
+}
+
+function spotTaken(spot: { x: number; y: number }, all: LiveNpc[], selfId: string) {
+  return all.some((other) => other.id !== selfId && ((other.x === spot.x && other.y === spot.y) || (other.sim?.errand && other.sim.errand.x === spot.x && other.sim.errand.y === spot.y && other.sim.errand.kind !== "seek")));
+}
+
+function pickSpot(spots: Spot[], from: { x: number; y: number }, all: LiveNpc[], selfId: string, near?: { x: number; y: number }): Spot | undefined {
+  const free = spots.filter((spot) => !spotTaken(spot, all, selfId));
+  if (!free.length) return undefined;
+  const anchor = near ?? from;
+  const sorted = [...free].sort((a, b) => Math.abs(a.x - anchor.x) + Math.abs(a.y - anchor.y) - (Math.abs(b.x - anchor.x) + Math.abs(b.y - anchor.y)));
+  return pick(sorted.slice(0, 3));
+}
+
+function breakBound(all: LiveNpc[], excludingId: string) {
+  return all.filter((npc) => npc.id !== excludingId && (isBreakRoomTile(npc.x, npc.y) || (npc.sim?.errand && isBreakRoomTile(npc.sim.errand.x, npc.sim.errand.y) && npc.sim.errand.stage === "go" && npc.sim.errand.kind !== "work"))).length;
+}
+
+function errandUseTicks(kind: ErrandKind, onBreak = false) {
+  const ranges: Record<ErrandKind, [number, number]> = { coffee: [8, 14], water: [5, 9], fridge: [8, 13], microwave: [10, 16], bathroom: [7, 12], sit: [14, 24], phone: [10, 18], desk: [14, 26], seek: [1, 1], work: [60, 200] };
+  const [min, max] = ranges[kind];
+  const base = min + Math.floor(Math.random() * (max - min + 1));
+  return onBreak && (kind === "sit" || kind === "phone") ? base * 3 : base;
+}
+
+function workErrand(npc: LiveNpc, sim: NpcSim, all: LiveNpc[], ctx: NpcSimContext, onShift: boolean): NpcErrand | undefined {
+  const trait = gen2SimTraitFor(npc.id);
+  const home = homeRoomOf(npc, ctx);
+  if (!home) return undefined;
+  const spots = favoriteSpots(npc.id, home);
+  const here = sim.errand?.kind === "work" ? { x: sim.errand.x, y: sim.errand.y } : { x: npc.x, y: npc.y };
+  const options = spots.filter((spot) => !(spot.x === here.x && spot.y === here.y));
+  const spot = pickSpot(options.length ? options : spots, npc, all, npc.id);
+  if (!spot) return undefined;
+  // Tens of seconds up to a few minutes at each station; off shift they just stay put.
+  const base = spot.seat ? 130 + Math.random() * 300 : 55 + Math.random() * 210;
+  const dwell = Math.round(base * trait.pauseScale * (onShift ? 1 : 3));
+  return { kind: "work", x: spot.x, y: spot.y, face: spot.face, seat: spot.seat, stage: "go", left: dwell, timeout: 120 };
+}
+
+function breakErrand(npc: LiveNpc, sim: NpcSim, all: LiveNpc[], slotId: string | undefined): NpcErrand | undefined {
+  const stations = getStations();
+  const trait = gen2SimTraitFor(npc.id);
+  const hungry = slotId === "lunch" || sim.needs.hunger >= 60;
+  const pool: ErrandKind[] = hungry
+    ? ["fridge", "microwave", "sit", "water", "phone"]
+    : slotId === "morning" ? ["coffee", "coffee", "sit", "water", "phone"] : ["coffee", "water", "sit", "phone", trait.favorite === "sit" || trait.favorite === "phone" ? trait.favorite : "water"];
+  const spotsFor: Record<string, Spot[]> = { coffee: stations.coffee, water: stations.water, fridge: stations.fridge, microwave: stations.microwave, sit: stations.breakSeat, phone: stations.breakSeat };
+  const kinds = [...pool].sort(() => Math.random() - 0.5);
+  const company = all.filter((other) => other.id !== npc.id && isBreakRoomTile(other.x, other.y));
+  const near = company.length && Math.random() < 0.6 ? pick(company) : undefined;
+  for (const kind of kinds) {
+    const spot = pickSpot(spotsFor[kind] ?? [], npc, all, npc.id, near && (kind === "sit" || kind === "phone" || kind === "water" || kind === "coffee") ? near : undefined);
+    if (spot) return { kind, x: spot.x, y: spot.y, face: spot.face, seat: spot.seat, stage: "go", left: errandUseTicks(kind, true), timeout: 140 };
+  }
+  return undefined;
+}
+
+function reliefFor(kind: ErrandKind, needs: NpcNeeds): NpcNeeds {
+  const next = { ...needs };
+  if (kind === "coffee") { next.energy -= 45; next.hunger -= 12; }
+  if (kind === "water") { next.hunger -= 30; next.energy -= 8; }
+  if (kind === "fridge") { next.hunger -= 60; }
+  if (kind === "microwave") { next.hunger -= 55; next.energy -= 10; }
+  if (kind === "bathroom") { next.bladder = 0; }
+  if (kind === "sit") { next.energy -= 55; }
+  if (kind === "phone") { next.social -= 25; next.energy -= 25; }
+  return { energy: Math.max(0, next.energy), social: Math.max(0, next.social), hunger: Math.max(0, next.hunger), bladder: Math.max(0, next.bladder) };
+}
+
+function standStill(npc: LiveNpc, sim: NpcSim, dir?: Gen2Direction, pause?: number): LiveNpc {
+  return { ...npc, dir: dir ?? npc.dir, stepFrame: 0, pause: pause ?? npc.pause, sim };
+}
+
+function isBreakKind(kind: ErrandKind) {
+  return kind !== "work" && kind !== "bathroom";
+}
+
+function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx: NpcSimContext = EMPTY_SIM_CONTEXT): LiveNpc {
+  const trait = gen2SimTraitFor(npc.id);
+  let sim = tickSim(npc.sim ?? createSim(npc.id), npc, ctx);
+  const critical = isCriticalNow(npc, ctx);
+  const schedule = scheduleOf(npc, ctx);
+  const onShift = gen2OnShift(schedule, ctx.minute);
+
+  // 1. Conversations: stand, face partner, resume after a few seconds.
+  if (sim.chat) {
+    const partner = allNpcs.find((other) => other.id === sim.chat?.with);
+    const partnerTalking = !!partner && partner.sim?.chat?.with === npc.id;
+    if (!partnerTalking || sim.chat.left <= 0 || critical) {
+      sim = { ...sim, chat: undefined, chatCd: 70 + Math.floor(Math.random() * 120), needs: { ...sim.needs, social: Math.max(0, sim.needs.social - 55) } };
+    } else {
+      return standStill(npc, { ...sim, chat: { ...sim.chat, left: sim.chat.left - 1 } }, partner ? faceToward(npc, partner, npc.dir) : npc.dir);
+    }
+  }
+
+  // 2. Schedule: shift boundaries and break windows.
+  let onBreak = onShift && sim.breakUntil > ctx.abs;
+  if (!onShift && sim.breakUntil) sim = { ...sim, breakUntil: 0 };
+  if (!onBreak && sim.breakUntil) sim = { ...sim, breakUntil: 0, errand: sim.errand && isBreakKind(sim.errand.kind) ? undefined : sim.errand };
+  if (!onShift && sim.mode === "trip") sim = { ...sim, mode: "work", tripIdx: 0 };
+  if (critical && sim.mode === "work") sim = { ...sim, tripCd: 0 };
+  if (onShift && !onBreak && npc.id !== "boss" && !critical && sim.mode === "work" && sim.breakRetry <= 0) {
+    const slot = gen2BreakWindowAt(schedule, ctx.minute);
+    const key = slot ? `${ctx.day}:${slot.id}` : "";
+    if (slot && sim.lastBreak !== key && !visibleCargo(npc, ctx.incidentPhase)) {
+      const dept = departmentOf(npc);
+      const mates = allNpcs.filter((other) => departmentOf(other) === dept);
+      const away = mates.filter((other) => other.id !== npc.id && isOnBreak(other, ctx)).length;
+      const coverage = away < Math.max(1, Math.floor(mates.length / 3));
+      const roomFree = isBreakRoomTile(npc.x, npc.y) || breakBound(allNpcs, npc.id) < 3;
+      const errand = coverage && roomFree ? breakErrand(npc, sim, allNpcs, slot.id) : undefined;
+      if (errand) {
+        sim = { ...sim, lastBreak: key, breakUntil: ctx.abs + slot.length, errand, breakRetry: 0, via: undefined, legFor: -1 };
+        onBreak = true;
+        npc = { ...npc, pause: 0 };
+      } else {
+        // Break room busy or department short-handed: postpone a few minutes.
+        sim = { ...sim, breakRetry: 20 + Math.floor(Math.random() * 20) };
+      }
+    }
+  }
+
+  // 3. Errands: urgent needs, break-room chain, and the daily work stations.
+  if (critical && sim.mode === "work" && sim.errand?.kind === "work" && sim.errand.left > 0) sim = { ...sim, errand: { ...sim.errand, left: 0 } };
+  if (critical && sim.errand && sim.errand.kind !== "work") sim = { ...sim, errand: undefined };
+  const workingNow = !sim.errand || sim.errand.kind === "work";
+  if (workingNow && sim.mode === "work" && !critical && npc.id !== "boss" && !visibleCargo(npc, ctx.incidentPhase)) {
+    let urgent: NpcErrand | undefined;
+    const stations = getStations();
+    if (sim.needs.bladder >= BATHROOM_THRESHOLD && sim.errandCd <= 0 && onShift && !bathroomOccupied(allNpcs, npc.id)) {
+      const spot = pickSpot(stations.bathroom, npc, allNpcs, npc.id);
+      if (spot) urgent = { kind: "bathroom", x: spot.x, y: spot.y, face: spot.face, stage: "go", left: errandUseTicks("bathroom"), timeout: 100 };
+    } else if (onBreak && sim.errandCd <= 0) {
+      urgent = breakErrand(npc, sim, allNpcs, undefined);
+    } else if (onShift && sim.errandCd <= 0 && (sim.needs.energy >= DESPERATE_THRESHOLD || sim.needs.hunger >= DESPERATE_THRESHOLD) && (isBreakRoomTile(npc.x, npc.y) || breakBound(allNpcs, npc.id) < 3)) {
+      const kind: ErrandKind = sim.needs.hunger >= sim.needs.energy ? "water" : "coffee";
+      const spot = pickSpot(kind === "water" ? stations.water : stations.coffee, npc, allNpcs, npc.id);
+      if (spot) urgent = { kind, x: spot.x, y: spot.y, face: spot.face, stage: "go", left: errandUseTicks(kind), timeout: 100 };
+    }
+    if (urgent) {
+      sim = { ...sim, errand: urgent, via: undefined, legFor: -1 };
+      npc = { ...npc, pause: 0 };
+    } else if (sim.errandCd <= 0 && !sim.errand && onBreak) {
+      sim = { ...sim, errandCd: 4 + Math.floor(Math.random() * 6) };
+    }
+  }
+  if (!sim.errand && sim.mode === "work" && !onBreak) {
+    if (npc.pause > 0) return { ...npc, pause: npc.pause - 1, stepFrame: 0, sim };
+    const errand = workErrand(npc, sim, allNpcs, ctx, onShift);
+    if (errand) sim = { ...sim, errand, via: undefined, legFor: -1 };
+  }
+
+  if (sim.errand) {
+    const errand = sim.errand;
+    if (errand.stage === "use" && (npc.x !== errand.x || npc.y !== errand.y)) {
+      sim = { ...sim, errand: { ...errand, stage: "go", timeout: 40 } };
+      return advanceNpc({ ...npc, sim }, walkable, allNpcs, ctx);
+    }
+    if (errand.stage === "use") {
+      if (errand.left > 0) return standStill(npc, { ...sim, errand: { ...errand, left: errand.left - 1 } }, errand.face);
+      const needs = reliefFor(errand.kind, sim.needs);
+      if (errand.kind === "work") {
+        // Dwell finished: occasionally head out on a production/handoff trip, otherwise hop to another station.
+        const canTrip = onShift && !onBreak && !critical ? sim.tripCd <= 0 && npc.route.length > 1 : critical && npc.route.length > 1;
+        if (canTrip) return standStill(npc, { ...sim, needs, errand: undefined, mode: "trip", tripIdx: 0, legFor: -1, via: undefined }, undefined, 0);
+        return standStill(npc, { ...sim, needs, errand: undefined, errandCd: 0 }, undefined, 0);
+      }
+      sim = { ...sim, needs, errand: undefined, errandCd: onBreak ? Math.floor(Math.random() * 5) : 40 + Math.floor(Math.random() * 60) };
+      return standStill(npc, sim, undefined, 0);
+    }
+    // stage "go"
+    const live = errand;
+    if (live.timeout <= 0) return standStill(npc, { ...sim, errand: undefined, errandCd: live.kind === "work" ? 0 : 20 + Math.floor(Math.random() * 30) });
+    const progressed: NpcSim = { ...sim, errand: { ...live, timeout: live.timeout - 1 } };
+    if (npc.x === live.x && npc.y === live.y) {
+      return standStill(npc, { ...progressed, errand: { ...live, stage: "use", timeout: 0 } }, live.face);
+    }
+    const next = nextStep({ x: npc.x, y: npc.y }, { x: live.x, y: live.y }, walkable, live.seat ? tileKey(live.x, live.y) : undefined);
+    if (!next) return standStill(npc, { ...progressed, errand: undefined, errandCd: 40 });
+    const enteringBath = isBathroomTile(next.x, next.y) && !isBathroomTile(npc.x, npc.y);
+    const enteringBreak = isBreakRoomTile(next.x, next.y) && !isBreakRoomTile(npc.x, npc.y);
+    if ((enteringBath && bathroomOccupied(allNpcs, npc.id)) || (enteringBreak && breakRoomCount(allNpcs, npc.id) >= 3)) return standStill(npc, progressed);
+    if (trait.pace < 1 && Math.random() > trait.pace) return standStill(npc, progressed);
+    return { ...npc, x: next.x, y: next.y, dir: directionTo(npc.x, npc.y, next.x, next.y), stepFrame: npc.stepFrame === 1 ? 2 : 1, sim: progressed };
+  }
+
+  // 4. Production / handoff trip: walk the worker's route once, then go back to work.
+  if (sim.mode === "trip") {
+    if (npc.pause > 0) return { ...npc, pause: npc.pause - 1, stepFrame: 0, sim };
+    const endTrip = (): LiveNpc => ({ ...npc, routeIndex: 0, stepFrame: 0, pause: 0, sim: { ...sim, mode: "work", tripIdx: 0, tripCd: tripCooldown(npc), via: undefined, legFor: -1 } });
+    if (sim.tripIdx >= npc.route.length || !onShift) return endTrip();
+    let index = sim.tripIdx;
+    let target = npc.route[index];
+    if (isBathroomTile(target.x, target.y) && !isBathroomTile(npc.x, npc.y) && bathroomOccupied(allNpcs, npc.id)) {
+      return { ...npc, routeIndex: Math.min(index + 1, npc.route.length - 1), pause: 1, stepFrame: 0, sim: { ...sim, tripIdx: index + 1, via: undefined, legFor: -1 } };
+    }
+    if (isBreakRoomTile(target.x, target.y) && !isBreakRoomTile(npc.x, npc.y) && breakRoomCount(allNpcs, npc.id) >= 3) {
+      return { ...npc, routeIndex: Math.min(index + 1, npc.route.length - 1), pause: 1, stepFrame: 0, sim: { ...sim, tripIdx: index + 1, via: undefined, legFor: -1 } };
+    }
+    index = Math.min(index, npc.route.length - 1);
+    target = npc.route[index];
+    const routedTarget = nearestWalkableGoal(target, walkable) ?? target;
+    if (npc.x === routedTarget.x && npc.y === routedTarget.y) {
+      const base = Math.min(target.pause ?? randomPause(npc), 10);
+      const pause = Math.max(0, Math.round(base * trait.pauseScale * (0.75 + Math.random() * 0.5)));
+      return { ...npc, dir: target.face ?? npc.dir, routeIndex: Math.min(index + 1, npc.route.length - 1), pause, stepFrame: 0, sim: { ...sim, tripIdx: index + 1, via: undefined, legFor: -1 } };
+    }
+    let goal: { x: number; y: number } = target;
+    if (sim.via) {
+      if (npc.x === sim.via.x && npc.y === sim.via.y) sim = { ...sim, via: undefined };
+      else goal = sim.via;
+    } else if (sim.legFor !== index) {
+      const via = chooseDetour(npc, routedTarget, trait.wander);
+      sim = { ...sim, legFor: index, via };
+      if (via) goal = via;
+    }
+    let next = nextStep({ x: npc.x, y: npc.y }, goal, walkable);
+    if (!next && sim.via) {
+      sim = { ...sim, via: undefined };
+      next = nextStep({ x: npc.x, y: npc.y }, target, walkable);
+    }
+    if (!next) return { ...npc, routeIndex: index, pause: 1, stepFrame: 0, sim: { ...sim, tripIdx: index + 1 } };
+    if (trait.pace < 1 && Math.random() > trait.pace) return { ...npc, routeIndex: index, stepFrame: 0, sim };
+    return { ...npc, routeIndex: index, x: next.x, y: next.y, dir: directionTo(npc.x, npc.y, next.x, next.y), stepFrame: npc.stepFrame === 1 ? 2 : 1, sim };
+  }
+
+  return { ...npc, stepFrame: 0, sim };
+}
+
+function chooseDetour(npc: LiveNpc, target: { x: number; y: number }, wander: number) {
+  if (npc.id === "boss" || Math.random() > 0.08 * wander) return undefined;
+  const distance = Math.abs(target.x - npc.x) + Math.abs(target.y - npc.y);
+  if (distance < 14) return undefined;
+  const candidates = getStations().hallTiles.filter((tile) => {
+    const toTile = Math.abs(tile.x - npc.x) + Math.abs(tile.y - npc.y);
+    const fromTile = Math.abs(tile.x - target.x) + Math.abs(tile.y - target.y);
+    return toTile >= 5 && toTile + fromTile <= distance + 12;
+  });
+  return candidates.length ? pick(candidates) : undefined;
 }
 
 function randomPause(npc: LiveNpc) {
@@ -2291,39 +2980,37 @@ function randomPause(npc: LiveNpc) {
   return 1 + Math.floor(Math.random() * 4);
 }
 
-function nextStep(from: { x: number; y: number }, to: { x: number; y: number }, walkable: Set<string>) {
-  const startTile = walkable.has(`${from.x},${from.y}`) ? from : nearestWalkableGoal(from, walkable, 18);
+const NEIGHBOR_OFFSETS = [
+  { x: 1, y: 0 },
+  { x: -1, y: 0 },
+  { x: 0, y: 1 },
+  { x: 0, y: -1 },
+];
+
+/** First step of a shortest path; ties between equally short paths are broken randomly. */
+function nextStep(from: { x: number; y: number }, to: { x: number; y: number }, walkable: Set<string>, allowTile?: string) {
+  const startTile = walkable.has(tileKey(from.x, from.y)) ? from : nearestWalkableGoal(from, walkable, 18);
   if (!startTile) return undefined;
   if (startTile.x !== from.x || startTile.y !== from.y) return startTile;
-  const start = `${startTile.x},${startTile.y}`;
-  const goalTile = nearestWalkableGoal(to, walkable);
+  const start = tileKey(startTile.x, startTile.y);
+  const goalTile = allowTile && tileKey(to.x, to.y) === allowTile ? to : nearestWalkableGoal(to, walkable);
   if (!goalTile) return undefined;
-  const goal = `${goalTile.x},${goalTile.y}`;
+  const goal = tileKey(goalTile.x, goalTile.y);
+  const open = (key: string) => walkable.has(key) || key === allowTile;
   const queue = [startTile];
   const cameFrom = new Map<string, string | undefined>([[start, undefined]]);
-  const neighbors = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 },
-  ];
+  const shuffle = Math.random() < 0.6;
 
-  while (queue.length) {
-    const current = queue.shift();
-    if (!current) break;
-    if (`${current.x},${current.y}` === goal) break;
-
-    const ordered = [...neighbors].sort((a, b) => {
-      const aDistance = Math.abs(goalTile.x - (current.x + a.x)) + Math.abs(goalTile.y - (current.y + a.y));
-      const bDistance = Math.abs(goalTile.x - (current.x + b.x)) + Math.abs(goalTile.y - (current.y + b.y));
-      return aDistance - bDistance;
-    });
-
-    for (const offset of ordered) {
+  for (let head = 0; head < queue.length; head += 1) {
+    const current = queue[head];
+    if (tileKey(current.x, current.y) === goal) break;
+    const ordered = shuffle ? [...NEIGHBOR_OFFSETS].sort(() => Math.random() - 0.5) : NEIGHBOR_OFFSETS;
+    const ranked = [...ordered].sort((a, b) => (Math.abs(goalTile.x - (current.x + a.x)) + Math.abs(goalTile.y - (current.y + a.y))) - (Math.abs(goalTile.x - (current.x + b.x)) + Math.abs(goalTile.y - (current.y + b.y))));
+    for (const offset of ranked) {
       const step = { x: current.x + offset.x, y: current.y + offset.y };
-      const key = `${step.x},${step.y}`;
-      if (cameFrom.has(key) || !walkable.has(key)) continue;
-      cameFrom.set(key, `${current.x},${current.y}`);
+      const key = tileKey(step.x, step.y);
+      if (cameFrom.has(key) || !open(key)) continue;
+      cameFrom.set(key, tileKey(current.x, current.y));
       queue.push(step);
     }
   }
@@ -2359,7 +3046,14 @@ function directionTo(x: number, y: number, nx: number, ny: number): Gen2Directio
   return "down";
 }
 
+let walkableCache: Set<string> | undefined;
+
 function buildWalkable() {
+  if (!walkableCache) walkableCache = computeWalkable();
+  return walkableCache;
+}
+
+function computeWalkable() {
   const set = new Set<string>();
   const doorCells = new Set<string>();
   for (const hall of gen2Hallways) fill(set, hall.x, hall.y, hall.w, hall.h);
@@ -2394,7 +3088,7 @@ function buildWalkable() {
 }
 
 function propBlocksMovement(prop: Gen2Prop) {
-  return !["monitor", "growLight", "pipe", "irrigation", "whiteboard", "sealedDoor"].includes(prop.kind);
+  return gen2PropBlocksMovement(prop);
 }
 
 function fill(set: Set<string>, x: number, y: number, w: number, h: number) {
@@ -2548,6 +3242,10 @@ function staffSelection(npc: LiveNpc, staff?: GrowOpsStaff): Selection {
       `TITLE: ${profile.title}`,
       `DEPT: ${profile.department}`,
       `MOOD: ${moodText(npc, profile)}`,
+      `BLOCK: ${scheduleBlockText(npc, profile)}`,
+      `NEXT BREAK: ${scheduleBlockFor(npc, profile).nextBreakLabel}`,
+      `DOING: ${npcDoingLabel(npc)}`,
+      `NEED: ${npcNeedHint(npc)}`,
       `ACTION: ${profile.currentAction}`,
       `REPORTS TO: ${profile.reportTarget}`,
       `TRAIT: ${profile.personality}`,
@@ -2916,6 +3614,56 @@ function visibleCargo(npc: LiveNpc, incidentPhase: number): Gen2Npc["cargo"] | u
     salesRep: [4],
   };
   return npc.cargo && deliveryLegs[npc.id]?.includes(npc.routeIndex) ? npc.cargo : undefined;
+}
+
+const ERRAND_TAGS: Record<ErrandKind, string> = { coffee: "COF", water: "H2O", fridge: "YUM", microwave: "BZZ", bathroom: "", sit: "ZZ", phone: "TXT", desk: "TYP", seek: "", work: "" };
+
+const ERRAND_LABELS: Record<ErrandKind, [string, string]> = {
+  coffee: ["HEADING FOR COFFEE", "POURING COFFEE"],
+  water: ["HEADING FOR WATER", "REFILLING WATER"],
+  fridge: ["HEADING FOR A SNACK", "RAIDING THE FRIDGE"],
+  microwave: ["HEADING TO MICROWAVE", "HEATING LUNCH"],
+  bathroom: ["HEADING TO RESTROOM", "IN THE RESTROOM"],
+  sit: ["LOOKING FOR A CHAIR", "RESTING IN A CHAIR"],
+  phone: ["LOOKING FOR A CHAIR", "CHECKING PHONE"],
+  desk: ["GOING TO DESK", "TYPING AT DESK"],
+  seek: ["LOOKING FOR COMPANY", "LOOKING FOR COMPANY"],
+  work: ["WALKING TO STATION", "WORKING AT STATION"],
+};
+
+function scheduleBlockFor(npc: LiveNpc, staff?: GrowOpsStaff) {
+  const schedule = staff?.schedule ?? gen2DefaultSchedule(npc.id, staff?.department ?? gen2WorkerProfiles[npc.id]?.department ?? humanizeNpcId(npc.role));
+  const abs = Math.floor(Date.now() / 60000);
+  const minute = clockMinuteNow();
+  const block = gen2ScheduleBlock(schedule, minute, !!npc.sim && npc.sim.breakUntil > abs);
+  return npc.id === "boss" ? { ...block, nextBreakLabel: "NONE (STAYS IN OFFICE)" } : block;
+}
+
+function scheduleBlockText(npc: LiveNpc, staff?: GrowOpsStaff) {
+  const block = scheduleBlockFor(npc, staff);
+  return `${block.kind} (${block.label})`;
+}
+
+function npcDoingLabel(npc: LiveNpc) {
+  const sim = npc.sim;
+  if (sim?.chat) return `CHATTING WITH ${npcName(sim.chat.with).toUpperCase()}`;
+  if (sim?.errand?.kind === "work" && sim.errand.stage === "use" && sim.errand.seat) return "WORKING AT DESK";
+  if (sim?.errand) return ERRAND_LABELS[sim.errand.kind][sim.errand.stage === "use" ? 1 : 0];
+  if (sim?.mode === "trip") return npc.pause > 0 ? "AT HANDOFF STOP" : "ON A DELIVERY TRIP";
+  return npc.pause > 0 ? "PAUSED AT STOP" : "ON ROUTE DUTY";
+}
+
+function npcNeedHint(npc: LiveNpc) {
+  const needs = npc.sim?.needs;
+  if (!needs) return "CONTENT";
+  const ranked: Array<[number, string]> = [
+    [needs.bladder, "NEEDS RESTROOM"],
+    [needs.energy, "TIRED / WANTS COFFEE"],
+    [needs.hunger, "HUNGRY / THIRSTY"],
+    [needs.social, "WANTS TO CHAT"],
+  ];
+  const top = ranked.sort((a, b) => b[0] - a[0])[0];
+  return top[0] >= 60 ? top[1] : top[0] >= 40 ? `MILD: ${top[1]}` : "CONTENT";
 }
 
 function npcActivity(npc: LiveNpc) {

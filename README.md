@@ -58,6 +58,25 @@ NeuroLab is then available on your tailnet at `https://<machine>.<tailnet>.ts.ne
 (tailnet only, not public). Stop it with `tailscale serve --https=10000 off`. Extra allowed
 host names can be set with `NEUROLAB_ALLOWED_HOSTS` (comma separated); `*.ts.net` is allowed by default.
 
+## Operations features
+
+- **History:** the backend samples host CPU/memory, tick, telemetry and service state every minute into SQLite
+  (7 days kept). `GET /api/history?minutes=120` feeds the sparklines in the status strip.
+- **Real alerts:** a telemetry device or NeuroLab service changing state (online to offline and back) raises a
+  facility alert and event, so dark rooms and security call-outs track the real machines.
+- **Boss debriefs / work orders:** once an hour (and on `POST /api/shift-report`) the boss files a numbered `WO-######`
+  debrief to `reports/wo-log.md` inside the data volume and to the `reports` table. Narration uses Ollama
+  (smallest installed model, or `NEUROLAB_REPORT_MODEL`); without Ollama it falls back to a template.
+  The container reaches Ollama at `host.docker.internal:11434`, so run Ollama with `OLLAMA_HOST=0.0.0.0`.
+- **Backups:** a daily `VACUUM INTO` copy of the database lands in `backups/` (7 kept).
+- **Live socket:** the status strip subscribes to the simulation websocket through the frontend proxy
+  (`/socket.io`) and falls back to polling.
+- **Write token (optional):** set `NEUROLAB_WRITE_TOKEN` in `.env` to require `Authorization: Bearer <token>` on every
+  non-GET `/api` call. Store it once in each browser: `localStorage.setItem("neurolab.token", "<token>")`.
+- **Install as an app:** the page ships a web manifest and service worker, so phones and Chrome can install it.
+- **Start at logon:** a scheduled task `NeuroLab Up` runs `scripts/neurolab-up.ps1 -NoBuild` one minute after logon.
+- **CI:** `.github/workflows/verify.yml` typechecks the services and runs `npm run verify` for the frontend.
+
 ## Space-Ghost integration
 
 `GET /api/summary` returns a compact read-only rollup (service health + latency, simulation tick,

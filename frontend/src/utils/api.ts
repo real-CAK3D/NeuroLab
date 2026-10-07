@@ -166,6 +166,12 @@ export async function getSummary(): Promise<NeuroLabSummary> {
   return fetchJson(`${backendUrl}/api/summary`);
 }
 
+export type HistorySample = { t: string; cpu: number | null; mem: number | null; tick: number | null; online: number | null; total: number | null; down: number | null; critical: number | null; tasks: number | null };
+
+export async function getHistory(minutes = 120): Promise<{ minutes: number; samples: HistorySample[] }> {
+  return fetchJson(`${backendUrl}/api/history?minutes=${minutes}`);
+}
+
 export async function getBootstrap(): Promise<BootstrapPayload> {
   return fetchJson(`${backendUrl}/api/bootstrap`);
 }
@@ -272,8 +278,21 @@ export async function undoActivityStateSnapshot(): Promise<ActivityStateResponse
   return fetchJson(`${backendUrl}/api/activity-state/undo`, { method: "POST" });
 }
 
+// When the server sets NEUROLAB_WRITE_TOKEN, save it once in this browser: localStorage.setItem("neurolab.token", "<token>").
+function writeToken() {
+  try {
+    return localStorage.getItem("neurolab.token") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...init });
+  const headers = new Headers(init?.headers);
+  const token = writeToken();
+  if (token && (init?.method ?? "GET") !== "GET") headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...init, headers });
+  if (response.status === 401) throw new Error("NeuroLab is write-locked (missing or wrong neurolab.token)");
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return response.json() as Promise<T>;
 }
