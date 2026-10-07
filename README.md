@@ -123,3 +123,7 @@ npm run build
 - Frontend never accesses system resources directly.
 - Monitor daemon is read-only (real `os`/`statfs` readings; no writes, no Docker socket).
 - Docker socket is not exposed to the frontend.
+
+## Credits
+
+Scenery sprites are recoloured CC0 (Kenney) and CC-BY 4.0 (marceles) pixel art; see [CREDITS.md](CREDITS.md) for sources, licenses and the required attribution. Regenerate with `python frontend/scripts/build-tiles.py`.
