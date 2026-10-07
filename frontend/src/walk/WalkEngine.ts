@@ -11,6 +11,8 @@ export type WalkEngineState = {
   dir: WalkDir;
   /** What the player is facing right now (staff name, prop name) or "". */
   facing: string;
+  /** Full readout of what is faced (caption strip), "" when nothing. */
+  caption: string;
   /** Transient feedback line ("NOTHING THERE."). */
   message: string;
 };
@@ -95,6 +97,7 @@ export class WalkEngine {
   private zoom = 4;
   private stepFlip = false;
   private lastFacing = "";
+  private lastCaption = "";
   private lastMessage = "";
   private messageUntil = 0;
   private lastEmit = "";
@@ -518,9 +521,12 @@ export class WalkEngine {
   private refreshFacing(force = false) {
     if (this.disposed) return;
     const vec = DIR_VEC[this.dir];
-    const label = this.opts.host().describe(this.px + vec.x, this.py + vec.y);
-    if (label !== this.lastFacing || force) {
+    const host = this.opts.host();
+    const label = host.describe(this.px + vec.x, this.py + vec.y);
+    const caption = label ? host.caption(this.px + vec.x, this.py + vec.y) : "";
+    if (label !== this.lastFacing || caption !== this.lastCaption || force) {
       this.lastFacing = label;
+      this.lastCaption = caption;
       this.emit();
     }
   }
@@ -534,8 +540,8 @@ export class WalkEngine {
   }
 
   private emit(force = false) {
-    const state: WalkEngineState = { view: this.view, x: this.px, y: this.py, dir: this.dir, facing: this.lastFacing, message: this.lastMessage };
-    const signature = `${state.view}|${state.x}|${state.y}|${state.dir}|${state.facing}|${state.message}`;
+    const state: WalkEngineState = { view: this.view, x: this.px, y: this.py, dir: this.dir, facing: this.lastFacing, caption: this.lastCaption, message: this.lastMessage };
+    const signature = `${state.view}|${state.x}|${state.y}|${state.dir}|${state.facing}|${state.caption}|${state.message}`;
     if (!force && signature === this.lastEmit) return;
     this.lastEmit = signature;
     this.opts.onState(state);

@@ -51,7 +51,7 @@ export function WalkMode(props: WalkModeProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const latest = useRef(props);
   latest.current = props;
-  const [state, setState] = useState<WalkEngineState>({ view, x: spawn.x, y: spawn.y, dir: spawn.dir, facing: "", message: "" });
+  const [state, setState] = useState<WalkEngineState>({ view, x: spawn.x, y: spawn.y, dir: spawn.dir, facing: "", caption: "", message: "" });
   const touch = useTouchLayout();
   const padVisible = pad ?? touch;
 
@@ -136,6 +136,13 @@ export function WalkMode(props: WalkModeProps) {
         <div className="walk-hud-hint">A: INTERACT&nbsp;&nbsp;V: VIEW&nbsp;&nbsp;ESC: EXIT</div>
         {state.message ? <div className="walk-hud-note">{state.message}</div> : state.facing ? <div className="walk-hud-note is-facing">A: {state.facing}</div> : null}
       </div>
+
+      {state.caption ? (
+        <div className="walk-caption" role="status">
+          <span>{state.caption}</span>
+          <em aria-hidden="true">A</em>
+        </div>
+      ) : null}
 
       <div className="walk-toolbar">
         <button type="button" onClick={(event) => tapButton(event, () => engineRef.current?.toggleView())} title="Switch top-down / first-person (V)">VIEW: {view === "fp" ? "1ST" : "TOP"}</button>

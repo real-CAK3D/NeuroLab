@@ -14,7 +14,7 @@ import {
   type Gen2Prop,
   type Gen2Room,
 } from "../game/gen2FacilityData";
-import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
+import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2FormatClock12, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
 import { LifecyclePanel } from "./LifecyclePanel";
 import { WalkMode } from "../walk/WalkMode";
@@ -337,7 +337,7 @@ export function Gen2FacilityDashboard() {
   const [isSavingActivity, setIsSavingActivity] = useState(false);
   const [activityLabOpen, setActivityLabOpen] = useState(false);
   const [intercomNotice, setIntercomNotice] = useState("INTERCOM STANDBY — route arrivals and manual lab controls will appear here.");
-  const [clockText, setClockText] = useState(() => gen2FormatClock(clockMinuteNow()));
+  const [clockText, setClockText] = useState(() => gen2FormatClock12(clockMinuteNow()));
   const [productionPhase, setProductionPhase] = useState(0);
   const [incidentPhase, setIncidentPhase] = useState(0);
   const [incidentTargetRoom, setIncidentTargetRoom] = useState<"rd1" | "rd2">("rd1");
@@ -465,7 +465,7 @@ export function Gen2FacilityDashboard() {
   }, []);
 
   useEffect(() => {
-    const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
+    const interval = window.setInterval(() => setClockText(gen2FormatClock12(clockMinuteNow())), 15000);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -643,7 +643,13 @@ export function Gen2FacilityDashboard() {
     if (walk.active) return;
     setFocusedRoomId(undefined);
     setContextMenu(undefined);
-    const spawn = pickWalkSpawn(npcsRef.current, walkable);
+    let spawn = pickWalkSpawn(npcsRef.current, walkable);
+    // dev aid: ?walkAt=x,y,dir starts the walk at a given tile (e.g. ?walkAt=57,20,down)
+    const walkAt = new URLSearchParams(window.location.search).get("walkAt")?.split(",");
+    if (walkAt && walkAt.length >= 2 && walkable.has(tileKey(Number(walkAt[0]), Number(walkAt[1])))) {
+      const dir = (["up", "down", "left", "right"] as const).find((item) => item === walkAt[2]) ?? "down";
+      spawn = { x: Number(walkAt[0]), y: Number(walkAt[1]), dir };
+    }
     const touch = typeof window !== "undefined" && (window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 900);
     setWalk({ active: true, view: "top", full: touch, pad: null, spawn });
     setIntercomNotice("VISITOR BADGE ISSUED: ENTERED THE FACILITY AT THE SCREENING ROOM.");
@@ -689,12 +695,53 @@ export function Gen2FacilityDashboard() {
       openTerminal(prop);
       return undefined;
     }
-    const lifeProp = lifePropState(prop, life, Date.now());
-    if (lifeProp?.selection) setSelection(lifeSelectionToSelection(lifeProp.selection));
-    else if (prop.kind === "wallSign") setSelection(actionSelection("WALL SIGN", [(prop.label ?? "SIGN").toUpperCase(), `ROOM: ${roomLabel(prop.room ?? "")}`]));
-    else if (prop.kind === "clock") setSelection(actionSelection("WALL CLOCK", [`FACILITY TIME: ${clockText}`]));
-    else setSelection(propSelection(prop, roomVitals));
+    setSelection(walkSelectionFor(prop));
     return undefined;
+  }
+
+  /** The same card content for A, the caption strip and the first-person text faces. */
+  function walkSelectionFor(prop: Gen2Prop): Selection {
+    const lifeProp = lifePropState(prop, life, Date.now());
+    if (lifeProp?.selection) return lifeSelectionToSelection(lifeProp.selection);
+    if (prop.kind === "wallSign") return actionSelection("WALL SIGN", [(prop.label ?? "SIGN").toUpperCase(), `ROOM: ${roomLabel(prop.room ?? "")}`, ...walkVitalLines(prop.room)]);
+    if (prop.kind === "clock") return actionSelection("WALL CLOCK", [`TIME: ${gen2FormatClock12(clockMinuteNow())}`]);
+    if (prop.kind === "whiteboard") return actionSelection(`${roomLabel(prop.room ?? "")} WHITEBOARD`, walkWhiteboardLines(prop.room));
+    if (prop.kind === "bulletin") return actionSelection("BULLETIN BOARD", walkNoticeLines(prop.room));
+    return propSelection(prop, roomVitals);
+  }
+
+  function walkVitalLines(roomId?: string) {
+    const vital = roomId ? roomVitals[roomId] : undefined;
+    if (!vital) return [];
+    return [vital.lifePrimary, vital.lifeSecondary, vital.primary, vital.secondary].filter((line): line is string => !!line);
+  }
+
+  function walkWhiteboardLines(roomId?: string) {
+    const op = roomId ? gen2RoomOperations[roomId] : undefined;
+    if (!op) return ["NOTES", "NOTHING WRITTEN HERE"];
+    return [...walkVitalLines(roomId).slice(0, 2), `JOB: ${op.title}`, `OWNER: ${op.owner}`, ...op.watches.slice(0, 3).map((item) => `- ${item}`), `ALERT: ${op.alertRules[0] ?? "NONE"}`];
+  }
+
+  function walkNoticeLines(roomId?: string) {
+    const op = roomId ? gen2RoomOperations[roomId] : undefined;
+    if (!op) return ["NOTICES", "NO NEW NOTICES"];
+    return ["NOTICES", op.title, `OWNER ${op.owner}`, `REPORTS TO ${op.reportTo}`];
+  }
+
+  function walkCaption(x: number, y: number) {
+    const npc = npcsRef.current.find((item) => item.x === x && item.y === y);
+    if (npc) {
+      const profile = staff[npc.id] ?? defaultGrowOpsStaff(npc);
+      return `${profile.name.toUpperCase()}, ${profile.title}. DOING: ${npcDoingLabel(npc)}. MOOD: ${moodText(npc, profile)}. NEED: ${npcNeedHint(npc)}.`;
+    }
+    const prop = walkPropAt(x, y);
+    if (!prop) return "";
+    if (prop.kind === "terminal" && prop.room === "rd2") {
+      const model = modelTerminalFor(prop, ollamaModels);
+      return `${model?.title ?? "MODEL TERMINAL"}: MODEL ${model?.model ?? "UNKNOWN"}. ${model?.detail ?? ""}`.trim();
+    }
+    const card = walkSelectionFor(prop);
+    return `${card.title}: ${card.lines.slice(0, 6).join(" / ")}`;
   }
 
   function walkDescribe(x: number, y: number) {
@@ -726,6 +773,26 @@ export function Gen2FacilityDashboard() {
       return out;
     },
     plantLook: (prop) => walkPlantLook(prop, life, roomVitals),
+    caption: walkCaption,
+    clock: () => {
+      const date = new Date();
+      return { hours: date.getHours(), minutes: date.getMinutes(), text: gen2FormatClock12(date.getHours() * 60 + date.getMinutes()) };
+    },
+    readout: (prop) => {
+      if (prop.kind === "monitor") {
+        const view = monitorViewFor(prop, roomVitals);
+        return [view.title, ...view.lines];
+      }
+      if (prop.kind === "whiteboard") return [`${roomLabel(prop.room ?? "")} BOARD`, ...walkWhiteboardLines(prop.room)];
+      if (prop.kind === "terminal") {
+        const model = prop.room === "rd2" ? modelTerminalFor(prop, ollamaModels) : undefined;
+        if (model) return [model.title, `MODEL ${model.model}`, model.detail];
+      }
+      const card = walkSelectionFor(prop);
+      return [card.title, ...card.lines];
+    },
+    signLines: (roomId) => [(gen2Rooms.find((room) => room.id === roomId)?.label ?? roomId).toUpperCase(), ...walkVitalLines(roomId).slice(0, 2)],
+    noticeLines: (roomId) => walkNoticeLines(roomId),
     interact: walkInteract,
     describe: walkDescribe,
     back: walkBack,
@@ -867,7 +934,7 @@ export function Gen2FacilityDashboard() {
           </div>
         </div>
 
-        <div ref={viewportRef} className={`gen2-viewport ${focusedRoom && !walk.active ? "is-detail" : ""} ${walk.active ? "is-walk" : ""} ${walk.active && walk.view === "fp" ? "is-walk-fp" : ""} ${walk.active && walk.full ? "is-walk-full" : ""}`} onClick={() => setContextMenu(undefined)} onContextMenu={(event) => event.preventDefault()}>
+        <div ref={viewportRef} style={clockHandStyle()} className={`gen2-viewport ${focusedRoom && !walk.active ? "is-detail" : ""} ${walk.active ? "is-walk" : ""} ${walk.active && walk.view === "fp" ? "is-walk-fp" : ""} ${walk.active && walk.full ? "is-walk-full" : ""}`} onClick={() => setContextMenu(undefined)} onContextMenu={(event) => event.preventDefault()}>
           {!focusedRoom || walk.active ? (
             <div ref={boardRef} className="gen2-board" style={{ width: worldWidth, height: worldHeight, transform: overviewTransform }}>
               {gen2Hallways.map((hall, index) => (
@@ -1406,9 +1473,9 @@ function GrowOpsPanel({
   }
 
   const schedule = draft.schedule ?? gen2DefaultSchedule(draft.id, draft.department);
-  const [clockText, setClockText] = useState(() => gen2FormatClock(clockMinuteNow()));
+  const [clockText, setClockText] = useState(() => gen2FormatClock12(clockMinuteNow()));
   useEffect(() => {
-    const interval = window.setInterval(() => setClockText(gen2FormatClock(clockMinuteNow())), 15000);
+    const interval = window.setInterval(() => setClockText(gen2FormatClock12(clockMinuteNow())), 15000);
     return () => window.clearInterval(interval);
   }, []);
   function setSchedule(next: Gen2Schedule) {
@@ -3700,6 +3767,13 @@ function roomAt(x: number, y: number) {
 // ---------------------------------------------------------------------------
 
 type WalkState = { active: boolean; view: WalkView; full: boolean; pad: boolean | null; spawn: { x: number; y: number; dir: WalkDir } };
+
+/** Rotation of the wall-clock hands in the top-down view (kept in step with the real time). */
+function clockHandStyle(): CSSProperties {
+  const date = new Date();
+  const minutes = date.getMinutes() + date.getSeconds() / 60;
+  return { "--clock-min": `${minutes * 6}deg`, "--clock-hour": `${(date.getHours() % 12) * 30 + minutes * 0.5}deg` } as CSSProperties;
+}
 
 /** Floor dressing the player's A button should look through. */
 const WALK_IGNORED_PROPS = new Set<Gen2Prop["kind"]>(["decal", "mat", "rug", "plantTag"]);

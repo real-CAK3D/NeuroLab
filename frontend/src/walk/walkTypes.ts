@@ -28,6 +28,16 @@ export type WalkHost = {
   interact(x: number, y: number): string | undefined;
   /** Short label for what the player is facing (empty when nothing). */
   describe(x: number, y: number): string;
+  /** Longer one-line readout (same content as the A card) for the caption strip, or "". */
+  caption(x: number, y: number): string;
+  /** Real wall-clock time for first-person wall clocks. */
+  clock(): { hours: number; minutes: number; text: string };
+  /** Text lines a screen / whiteboard / crate / shelf / terminal shows (first line is its title). */
+  readout(prop: Gen2Prop): string[] | undefined;
+  /** Lines for a room's wall sign: name plus live vitals / lifecycle phase. */
+  signLines(roomId: string): string[];
+  /** Lines for a room's bulletin board. */
+  noticeLines(roomId: string): string[];
   /** B: close the topmost card/menu/dialog. Returns true when something was closed. */
   back(): boolean;
   /** True while a modal (terminal chat, dialog) should swallow movement keys. */

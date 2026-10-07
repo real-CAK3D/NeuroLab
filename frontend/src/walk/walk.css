@@ -420,3 +420,94 @@
     bottom: 174px;
   }
 }
+
+/* caption strip: the full readout of what you face, always legible (Pokemon-style dialog strip) */
+.walk-caption {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  width: min(720px, calc(100% - 32px));
+  transform: translateX(-50%);
+  border: 4px solid #11151d;
+  background: #f6eed8;
+  box-shadow: inset -4px -4px 0 #9fb0b1, 0 0 0 2px #f6eed8;
+  color: #11151d;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.3;
+  padding: 6px 10px;
+  pointer-events: none;
+}
+
+.walk-caption span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.walk-caption em {
+  flex: none;
+  font-style: normal;
+  border: 2px solid #11151d;
+  background: #d9483d;
+  color: #fff7dc;
+  padding: 0 5px;
+  animation: markerBounce 0.8s steps(2, end) infinite;
+}
+
+.walk-layer.is-fp ~ .walk-card,
+.walk-card {
+  bottom: 74px;
+}
+
+@media (max-height: 520px) {
+  .walk-caption {
+    width: min(440px, calc(100% - 400px));
+    font-size: 0.66rem;
+    padding: 4px 8px;
+    bottom: 6px;
+  }
+
+  .walk-card {
+    bottom: 64px;
+  }
+}
+
+@media (max-width: 520px) {
+  .walk-caption {
+    width: calc(100% - 20px);
+    bottom: 176px;
+  }
+
+  .walk-card {
+    bottom: 240px;
+  }
+}
+
+/* top-down wall clocks follow the real time (--clock-min / --clock-hour are set on the viewport) */
+.gen2-prop.prop-clock::before {
+  left: 4px;
+  top: 1px;
+  width: 1px;
+  height: 4px;
+  background: #d94f4f;
+  transform-origin: 50% 100%;
+  transform: rotate(var(--clock-min, 0deg));
+}
+
+.gen2-prop.prop-clock::after {
+  left: 4px;
+  top: 2px;
+  width: 1px;
+  height: 3px;
+  background: #11151d;
+  animation: none;
+  transform-origin: 50% 100%;
+  transform: rotate(var(--clock-hour, 0deg));
+}
