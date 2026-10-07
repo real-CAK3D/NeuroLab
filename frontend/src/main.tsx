@@ -6,6 +6,7 @@ import "./propSprites.css";
 import "./sceneSprites.css";
 import "./lifecycle.css";
 import "./walk/walk.css";
+import "./talk/talk.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
