@@ -11,7 +11,7 @@ import { db } from "../database/db";
 import { employeesQuery, reportsQuery, roomsQuery, tasksQuery } from "../database/queries";
 import { eventBus } from "../events/bus";
 import { getLifecycleSnapshot, getTimeScale, setTimeScale } from "../services/lifecycle";
-import { getPersona, npcChat, updatePersona, type NpcChatRequest, type NpcFacts } from "../services/npcChat";
+import { addMemory, getPersona, memoriesFor, npcBanter, npcChat, updatePersona, type BanterRequest, type NpcChatRequest, type NpcFacts } from "../services/npcChat";
 import { generateShiftReport, latestShiftReport, readHistory } from "../services/monitoring";
 
 const execFileAsync = promisify(execFile);
@@ -321,11 +321,29 @@ export function apiRouter(): Router {
   // Talk to a staff sprite: persona + brief + live facts, phrased by an Ollama model (template fallback).
   router.post("/npc/chat", async (req: Request, res: Response) => {
     const body = req.body as NpcChatRequest | undefined;
-    const topics = ["job", "recent", "upcoming", "coworkers", "day", "weather", "interests", "life", "facility", "free"];
+    const topics = ["job", "recent", "upcoming", "coworkers", "day", "weather", "interests", "life", "facility", "memories", "plans", "favorites", "free"];
     if (!body?.npc?.id || !body.npc.name || !topics.includes(body.topic)) return res.status(400).json({ error: "npc {id,name} and a valid topic are required" });
     const devices = await readFacilityDevices();
     const [summary] = await Promise.all([computeSummary()]);
     res.json(await npcChat(body, { summary, lifecycle: getLifecycleSnapshot(devices) as unknown as NpcFacts["lifecycle"] }));
+  });
+
+  // Overheard exchanges between two staff for the chat bubbles (AI-written, cached, with a template fallback).
+  router.post("/npc/banter", async (req: Request, res: Response) => {
+    const body = req.body as BanterRequest | undefined;
+    if (!body?.a?.id || !body.b?.id) return res.status(400).json({ error: "a and b ({id,name}) are required" });
+    res.json(await npcBanter(body));
+  });
+
+  // Staff memories: the dashboard can file events (fire response, harvests, birthdays); promotions and transfers are detected from the roster.
+  router.get("/npc/memories/:id", (req: Request, res: Response) => {
+    res.json({ memories: memoriesFor(String(req.params.id), 20) });
+  });
+  router.post("/npc/memories/:id", (req: Request, res: Response) => {
+    const text = String(req.body?.text ?? "").trim();
+    if (!text) return res.status(400).json({ error: "text is required" });
+    addMemory(String(req.params.id), String(req.body?.kind ?? "event").slice(0, 24), text, Math.min(5, Math.max(1, Number(req.body?.importance) || 2)));
+    res.status(201).json({ memories: memoriesFor(String(req.params.id), 20) });
   });
 
   router.get("/npc/persona/:id", (req: Request, res: Response) => {

@@ -95,6 +95,15 @@ Time runs at `NEUROLAB_TIME_SCALE` times real time (default **24**: one real hou
 `POST /api/lifecycle/scale {"scale": 24}`. `GET /api/lifecycle` returns room phases, batches, mothers, inventory, sales, samples and a log.
 Preview it quickly with `npx tsx backend/scripts/simulate-lifecycle.ts 110` (fast-forwards 110 facility days on a scratch database).
 
+## Talking to staff (AI)
+
+Staff have stable, editable personalities and memories, and conversations are phrased by an Ollama model:
+
+- **Personas** (`GET/PUT /api/npc/persona/:id`): hobbies, loves and hates, likes and dislikes, favorite color, music, artist, show and team, pet, family, home, commute, relationship, morning routine, fears, guilty pleasure, catchphrase, birthday, and a Maine flavor. They are generated once per worker, stored in SQLite, and can be edited.
+- **Memories** (`GET/POST /api/npc/memories/:id`): promotions, transfers and new hires are noticed automatically from the roster the dashboard sends with each chat ("I remember when I got promoted"), coworkers remember too, and each conversation with the Inspector is remembered. The dashboard can file more events.
+- **Calendar and weather:** holidays (federal, Maine's Patriots' Day, 4/20, Halloween and more), the season, birthdays, and real weather for **Lewiston, Maine** from Open-Meteo (override with `NEUROLAB_WEATHER_LAT/LON/PLACE`; time zone `NEUROLAB_TZ`, default America/New_York).
+- **Chat** (`POST /api/npc/chat`) and **banter** (`POST /api/npc/banter`, short overheard exchanges for chat bubbles). The model is `NEUROLAB_NPC_MODEL`, else the smallest installed non-reasoning chat model (qwen3 and other reasoning models are slower and need thinking enabled; embedding models are skipped). Replies fall back to templates if Ollama is down.
+
 ## Space-Ghost integration
 
 `GET /api/summary` returns a compact read-only rollup (service health + latency, simulation tick,

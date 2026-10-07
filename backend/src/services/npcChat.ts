@@ -1,4 +1,6 @@
 import { db } from "../database/db";
+import { calendarFacts, clockLabel, dayPart, daysUntilBirthday, formatBirthday, localParts } from "./calendar";
+import { addMemory, memoriesFor, syncRoster } from "./npcMemory";
 import { ollamaChat, type ChatMessage } from "./ollama";
 
 /*
@@ -16,7 +18,7 @@ export type NpcChatRequest = {
   npc: NpcBrief;
   roster?: Array<{ id: string; name: string; title?: string; department?: string }>;
   nearby?: Array<{ name: string; doing?: string }>;
-  topic: "job" | "recent" | "upcoming" | "coworkers" | "day" | "weather" | "interests" | "life" | "facility" | "free";
+  topic: "job" | "recent" | "upcoming" | "coworkers" | "day" | "weather" | "interests" | "life" | "facility" | "memories" | "plans" | "favorites" | "free";
   message?: string;
   history?: Array<{ from: "player" | "npc"; text: string }>;
   clock?: { label?: string; part?: string; day?: string };
@@ -28,6 +30,8 @@ export type NpcFacts = {
 
 export type Persona = {
   hobbies: string[]; favoriteFood: string; pet: string; home: string; family: string; weekend: string; dream: string; quirk: string; music: string; hometown: string;
+  likes: string[]; dislikes: string[]; loves: string[]; hates: string[]; favoriteColor: string; favoriteArtist: string; favoriteShow: string; favoriteTeam: string;
+  maineThing: string; commute: string; relationship: string; morning: string; fear: string; guiltyPleasure: string; catchphrase: string; birthdayMonth: number; birthdayDay: number;
 };
 
 const HOBBIES = ["fishing", "retro handheld gaming", "backyard gardening", "baking sourdough", "weekend hiking", "woodworking", "playing guitar", "birdwatching", "pixel art", "chess", "road trips", "cooking ramen", "skateboarding", "building model trains", "stargazing", "thrifting", "kayaking", "board games", "running 5Ks", "collecting vinyl records", "restoring old radios", "baking pies", "disc golf", "painting minis"];
@@ -40,6 +44,21 @@ const DREAMS = ["opening a little cafe someday", "learning to fly a small plane"
 const QUIRKS = ["always hums while working", "keeps a lucky pen in their pocket", "organizes everything by color", "talks to the plants", "never skips a morning coffee ritual", "writes tiny to-do lists on sticky notes", "can't resist a pun", "collects odd bottle caps", "is afraid of the vending machine"];
 const MUSIC = ["lo-fi beats", "classic rock", "synthwave", "country road songs", "90s pop", "jazz piano", "video game soundtracks", "indie folk"];
 const TOWNS = ["a lake town upstate", "a mill town two hours away", "the next county over", "a farm outside the city", "a coastal fishing village", "a college town"];
+const LIKES = ["a hot cup of coffee before sunrise", "fresh-baked bread", "a tidy, organized station", "a good rainstorm", "old kung fu movies", "a parking spot right by the door", "the smell of cut grass", "crisp sunny fall days", "mechanical keyboards", "a quiet lunch outside", "trivia night", "well-labeled storage bins", "fuzzy socks", "cold lemonade", "crossword puzzles", "a freshly mopped floor", "maple creemees", "long phone calls with old friends"];
+const DISLIKES = ["loud chewing", "slow elevators", "lukewarm coffee", "people who microwave fish", "tangled cables", "being rushed", "wet socks", "spreadsheets with merged cells", "Monday mornings", "crowded grocery stores", "stale donuts", "slow Wi-Fi", "unlabeled containers", "when the vending machine eats a dollar"];
+const LOVES = ["their grandmother's recipes", "live music", "the first snowfall", "fall foliage drives", "their pet, more than most people", "Red Sox games on the radio", "homemade pie", "old family photos", "lakeside sunsets", "a really good book"];
+const HATES = ["black flies in June", "mud season", "paperwork", "spiders", "being late", "turnpike traffic", "parallel parking", "cilantro (tastes like soap to them)", "the dentist", "how early it gets dark in November"];
+const COLORS = ["forest green", "sunset orange", "sky blue", "burgundy", "teal", "mustard yellow", "lavender", "charcoal", "coral", "navy blue", "olive", "rust red"];
+const ARTISTS = ["Fleetwood Mac", "Tom Petty", "Taylor Swift", "Johnny Cash", "Bob Seger", "Dolly Parton", "Queen", "Hozier", "the Beatles", "Stevie Wonder", "Fleet Foxes", "Journey"];
+const SHOWS = ["a baking competition show", "old sitcom reruns", "nature documentaries", "cozy mystery shows", "a long-running cartoon", "home renovation shows", "retro game speedruns", "true-crime documentaries"];
+const TEAMS = ["the Red Sox", "the Patriots", "the Bruins", "the Maine Mariners", "the Portland Sea Dogs", "the Celtics", "no team, they just like the snacks"];
+const MAINE_THINGS = ["lobster rolls", "Moxie soda", "whoopie pies", "poutine from a Lewiston spot", "ice fishing", "snowmobiling", "walking the Androscoggin River trail", "Bates College hockey games", "apple picking in the fall", "camping at a lake in the summer", "their L.L.Bean boots", "Italian sandwiches", "the Great Falls Balloon Festival", "blueberry picking in August"];
+const COMMUTES = ["drives a rusty pickup whose heater only works on high", "bikes in when the weather is decent", "takes the bus and reads the whole ride", "carpools with a neighbor", "walks in from a few blocks away", "drives a hand-me-down hatchback with 200,000 miles on it"];
+const RELATIONSHIPS = ["single and happy about it", "in a long relationship", "married with a loud dinner table", "recently engaged", "dating someone new and shy about it", "lives with roommates"];
+const MORNINGS = ["up at 5:30 for coffee on the porch", "hits snooze three times", "does a short stretch routine", "packs a big lunch the night before", "listens to the radio in the truck"];
+const FEARS = ["ice on the roads", "deep water", "public speaking", "spiders", "heights", "forgetting an important date"];
+const GUILTY = ["reality dating shows", "gas station pastries", "buying yet another notebook", "falling asleep during movies", "humming along to bad pop songs"];
+const CATCHPHRASES = ["Well, there you go.", "Ayuh, that tracks.", "Can't complain.", "That's how the cookie crumbles.", "Wicked good.", "Fair enough.", "Alright, alright.", "Take it easy now."];
 const OPINIONS = ["is always friendly at the coffee machine", "works harder than anyone and never complains", "is a bit chatty but means well", "keeps their station spotless", "tells the best break-room stories", "borrows pens and never returns them", "is quiet but incredibly reliable", "is great at calming everyone down when things get busy", "always knows where the missing supplies are", "has a funny laugh you can hear down the hall"];
 
 function hashString(value: string) {
@@ -61,6 +80,11 @@ function generatePersona(id: string): Persona {
   return {
     hobbies: [first, second], favoriteFood: pick(FOODS, seed, 4), pet: pick(PETS, seed, 5), home: pick(HOMES, seed, 6), family: pick(FAMILY, seed, 7),
     weekend: pick(WEEKENDS, seed, 8), dream: pick(DREAMS, seed, 9), quirk: pick(QUIRKS, seed, 10), music: pick(MUSIC, seed, 11), hometown: pick(TOWNS, seed, 12),
+    likes: [pick(LIKES, seed, 13), pick(LIKES, seed, 14), pick(LIKES, seed, 15)], dislikes: [pick(DISLIKES, seed, 16), pick(DISLIKES, seed, 17)],
+    loves: [pick(LOVES, seed, 18)], hates: [pick(HATES, seed, 19)], favoriteColor: pick(COLORS, seed, 20), favoriteArtist: pick(ARTISTS, seed, 21),
+    favoriteShow: pick(SHOWS, seed, 22), favoriteTeam: pick(TEAMS, seed, 23), maineThing: pick(MAINE_THINGS, seed, 24), commute: pick(COMMUTES, seed, 25),
+    relationship: pick(RELATIONSHIPS, seed, 26), morning: pick(MORNINGS, seed, 27), fear: pick(FEARS, seed, 28), guiltyPleasure: pick(GUILTY, seed, 29),
+    catchphrase: pick(CATCHPHRASES, seed, 30), birthdayMonth: (hashString(`${seed}:bm`) % 12) + 1, birthdayDay: (hashString(`${seed}:bd`) % 28) + 1,
   };
 }
 
@@ -85,15 +109,22 @@ const WEATHER_CODES: Record<number, string> = { 0: "clear skies", 1: "mostly cle
 
 export async function currentWeather(): Promise<string | null> {
   if (weatherCache && Date.now() - weatherCache.at < 10 * 60_000) return weatherCache.text;
-  const lat = Number(process.env.NEUROLAB_WEATHER_LAT);
-  const lon = Number(process.env.NEUROLAB_WEATHER_LON);
+  // Default location: Lewiston, Maine (override with NEUROLAB_WEATHER_LAT / LON / PLACE).
+  const lat = Number(process.env.NEUROLAB_WEATHER_LAT || 44.1004);
+  const lon = Number(process.env.NEUROLAB_WEATHER_LON || -70.2148);
+  const place = process.env.NEUROLAB_WEATHER_PLACE || "Lewiston, Maine";
   let text: string | null = null;
-  if (Number.isFinite(lat) && Number.isFinite(lon) && process.env.NEUROLAB_WEATHER_LAT && process.env.NEUROLAB_WEATHER_LON) {
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
     try {
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,wind_speed_10m&temperature_unit=fahrenheit&wind_speed_unit=mph`;
-      const data = await (await fetch(url, { signal: AbortSignal.timeout(5000) })).json() as { current?: { temperature_2m?: number; weather_code?: number; wind_speed_10m?: number } };
+      const tz = encodeURIComponent(process.env.NEUROLAB_TZ || "America/New_York");
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=${tz}&forecast_days=1`;
+      const data = await (await fetch(url, { signal: AbortSignal.timeout(6000) })).json() as { current?: { temperature_2m?: number; apparent_temperature?: number; weather_code?: number; wind_speed_10m?: number }; daily?: { temperature_2m_max?: number[]; temperature_2m_min?: number[]; sunrise?: string[]; sunset?: string[] } };
       const c = data.current;
-      if (c) text = `${WEATHER_CODES[c.weather_code ?? -1] ?? "mixed weather"}, ${Math.round(c.temperature_2m ?? 0)}°F, wind ${Math.round(c.wind_speed_10m ?? 0)} mph${process.env.NEUROLAB_WEATHER_PLACE ? ` in ${process.env.NEUROLAB_WEATHER_PLACE}` : ""}`;
+      if (c) {
+        // The API returns local wall-clock times (no zone), so read the clock digits directly.
+        const sun = (iso?: string) => { if (!iso) return "?"; const [h, m] = iso.slice(11, 16).split(":").map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`; };
+        text = `${WEATHER_CODES[c.weather_code ?? -1] ?? "mixed weather"}, ${Math.round(c.temperature_2m ?? 0)}°F (feels like ${Math.round(c.apparent_temperature ?? c.temperature_2m ?? 0)}°F), wind ${Math.round(c.wind_speed_10m ?? 0)} mph in ${place}; today's high ${Math.round(data.daily?.temperature_2m_max?.[0] ?? 0)}°F, low ${Math.round(data.daily?.temperature_2m_min?.[0] ?? 0)}°F; sunrise ${sun(data.daily?.sunrise?.[0])}, sunset ${sun(data.daily?.sunset?.[0])}`;
+      }
     } catch { text = null; }
   }
   weatherCache = { at: Date.now(), text };
@@ -125,7 +156,7 @@ function factLines(req: NpcChatRequest, facts: NpcFacts, weather: string | null)
   }
   if (weather) lines.push(`Weather outside right now: ${weather}.`);
   else lines.push("You have not checked the weather today and cannot see outside from the facility floor, so never state what the weather is; say you have not looked outside.");
-  if (req.clock?.label) lines.push(`It is ${req.clock.day ?? "today"}, ${req.clock.label} (${req.clock.part ?? "daytime"}).`);
+  for (const line of calendarFacts()) lines.push(line);
   return lines;
 }
 
@@ -139,19 +170,35 @@ const TOPIC_PROMPTS: Record<NpcChatRequest["topic"], string> = {
   interests: "Chat about your hobbies and interests outside work.",
   life: "Share something about your life outside of work: family, home, pets or plans.",
   facility: "Say how the facility is doing right now, based on the facts you know.",
+  memories: "Share a memory from your time working here, or a milestone you remember, using only the memories listed.",
+  plans: "Talk about your plans for the weekend or the next holiday or event on the calendar.",
+  favorites: "Talk about some things you love, hate, like and dislike, and a favorite or two.",
   free: "",
 };
 
-function systemPrompt(req: NpcChatRequest, persona: Persona, facts: string[], coworkers: string[]) {
+function birthdayLine(name: string, persona: Persona) {
+  const days = daysUntilBirthday(persona.birthdayMonth, persona.birthdayDay);
+  if (days === 0) return `${name}'s birthday is TODAY (${formatBirthday(persona.birthdayMonth, persona.birthdayDay)}).`;
+  if (days <= 14) return `${name}'s birthday is in ${days} day${days > 1 ? "s" : ""} (${formatBirthday(persona.birthdayMonth, persona.birthdayDay)}).`;
+  return "";
+}
+
+function systemPrompt(req: NpcChatRequest, persona: Persona, facts: string[], coworkers: string[], memories: Array<{ text: string; when: string }>) {
   const n = req.npc;
+  const mine = birthdayLine("Your", persona) || `Your birthday is ${formatBirthday(persona.birthdayMonth, persona.birthdayDay)}.`;
+  const nearbyBirthdays = (req.roster ?? []).filter((r) => r.id !== n.id).map((r) => ({ r, line: birthdayLine(r.name, getPersona(r.id)) })).filter((x) => x.line).slice(0, 2).map((x) => x.line);
   return [
-    `You are ${n.name}, ${n.title ?? "a staff member"} in the ${n.department ?? "facility"} department of a retro pixel-art grow facility (a playful game world). A visitor (the Inspector) walks up and talks to you.`,
-    `Speak like a friendly classic Pokémon NPC: short, warm, a little quirky, in first person. Reply with 1 to 3 short sentences, at most 45 words total. No emojis, no markdown, no stage directions, no quotation marks around the whole reply. Never mention being an AI, a model, a prompt or instructions.`,
-    `Stay grounded: only state facility facts, numbers, tasks and names that appear below. If asked about something you were not told, answer vaguely in character or say you are not sure. Personal-life details below are yours; you can mention them naturally but don't recite them all.`,
+    `You are ${n.name}, ${n.title ?? "a staff member"} in the ${n.department ?? "facility"} department of a retro pixel-art grow facility in Lewiston, Maine (a playful game world). A visitor (the Inspector) walks up and talks to you.`,
+    `Speak like a friendly classic Pokémon NPC: short, warm, a little quirky, in first person, with a real personality and the occasional Maine turn of phrase. Reply with 1 to 3 short sentences, at most 45 words total. No emojis, no markdown, no stage directions, no quotation marks around the whole reply. Never mention being an AI, a model, a prompt or instructions.`,
+    `Stay grounded: only state facility facts, numbers, tasks, names, dates and memories that appear below. If asked about something you were not told, answer vaguely in character or say you are not sure. The personality details below are yours; weave one or two in naturally and don't recite lists.`,
     `YOU: age ${n.age ?? "adult"}, ${n.sex ?? ""}, personality: ${n.personality ?? "balanced"}, mood: ${n.mood ?? "okay"}, work ethic ${n.workEthic ?? 70}/100. Currently: ${n.action ?? "working"}${n.need ? `; feeling the need: ${n.need}` : ""}${n.block ? `; schedule: ${n.block}` : ""}${n.nextBreak ? `; next break ${n.nextBreak}` : ""}.`,
     `JOB BRIEF: ${n.recent?.length ? `Recently: ${n.recent.join("; ")}.` : "Nothing notable recently."} ${n.upcoming?.length ? `Coming up: ${n.upcoming.join("; ")}.` : "Nothing special scheduled."}`,
-    `PERSONAL LIFE: hobbies ${persona.hobbies.join(" and ")}; favorite food ${persona.favoriteFood}; ${persona.pet}; lives in ${persona.home}; from ${persona.hometown}; ${persona.family}; weekends are ${persona.weekend}; dreams of ${persona.dream}; quirk: ${persona.quirk}; listens to ${persona.music}.`,
+    `PERSONAL LIFE: ${persona.relationship}; lives in ${persona.home}; from ${persona.hometown}; ${persona.family}; ${persona.pet}; ${persona.commute}; mornings: ${persona.morning}; weekends are ${persona.weekend}; dreams of ${persona.dream}; ${mine}`,
+    `LIKES AND DISLIKES: loves ${persona.loves.join(" and ")}; likes ${persona.likes.join(", ")}; dislikes ${persona.dislikes.join(" and ")}; hates ${persona.hates.join(" and ")}; afraid of ${persona.fear}; guilty pleasure: ${persona.guiltyPleasure}.`,
+    `FAVORITES: color ${persona.favoriteColor}; food ${persona.favoriteFood}; music ${persona.music} (especially ${persona.favoriteArtist}); show ${persona.favoriteShow}; team ${persona.favoriteTeam}; hobbies ${persona.hobbies.join(" and ")}; local favorite ${persona.maineThing}; quirk: ${persona.quirk}${Math.random() < 0.2 ? `; you may end this reply with your catchphrase: "${persona.catchphrase}"` : ". Do not use a catchphrase in this reply."}`,
+    memories.length ? `YOUR MEMORIES (you may bring one up naturally, like "I remember when ...", and only these):\n${memories.map((m) => `- ${m.text} (${m.when})`).join("\n")}` : "",
     coworkers.length ? `COWORKERS: ${coworkers.join(" ")}` : "",
+    nearbyBirthdays.length ? `BIRTHDAYS COMING UP: ${nearbyBirthdays.join(" ")}` : "",
     req.nearby?.length ? `NEARBY RIGHT NOW: ${req.nearby.map((p) => `${p.name}${p.doing ? ` (${p.doing})` : ""}`).join(", ")}.` : "",
     facts.length ? `FACTS:\n${facts.join("\n")}` : "",
   ].filter(Boolean).join("\n");
@@ -171,6 +218,9 @@ function template(req: NpcChatRequest, persona: Persona, weather: string | null)
     case "interests": return `When I'm off the clock I'm into ${persona.hobbies.join(" and ")}.`;
     case "life": return `Outside work, I live in ${persona.home} with ${persona.pet}. ${persona.family.charAt(0).toUpperCase()}${persona.family.slice(1)}.`;
     case "facility": return "Systems look steady from where I stand. Ask the security desk for details!";
+    case "memories": return memoriesFor(n.id, 1)[0]?.text ?? "Not much to look back on yet. Every day here is still kind of new!";
+    case "plans": return `This weekend? ${persona.weekend.charAt(0).toUpperCase()}${persona.weekend.slice(1)}, probably.`;
+    case "favorites": return `My favorite color's ${persona.favoriteColor}, and I'm all about ${persona.likes[0]}. ${persona.catchphrase}`;
     default: return "Hmm, good question. Let me think about that and get back to you!";
   }
 }
@@ -181,6 +231,7 @@ let chain: Promise<unknown> = Promise.resolve();
 let waiting = 0;
 
 export async function npcChat(req: NpcChatRequest, facts: NpcFacts): Promise<{ reply: string; source: "ollama" | "template"; model?: string }> {
+  if (req.roster?.length) syncRoster(req.roster); // notices promotions, transfers and new hires and files them as memories
   const persona = getPersona(req.npc.id);
   const weather = await currentWeather();
   const key = `${req.npc.id}|${req.topic}|${req.message ?? ""}|${(req.history ?? []).length}|${req.npc.action ?? ""}|${req.npc.mood ?? ""}`;
@@ -190,7 +241,7 @@ export async function npcChat(req: NpcChatRequest, facts: NpcFacts): Promise<{ r
   const fallback = () => ({ reply: template(req, persona, weather), source: "template" as const });
   if (waiting >= 3) return fallback();
 
-  const system = systemPrompt(req, persona, factLines(req, facts, weather), coworkerLines(req));
+  const system = systemPrompt(req, persona, factLines(req, facts, weather), coworkerLines(req), memoriesFor(req.npc.id, 7));
   const messages: ChatMessage[] = [{ role: "system", content: system }];
   for (const turn of (req.history ?? []).slice(-6)) messages.push({ role: turn.from === "player" ? "user" : "assistant", content: turn.text.slice(0, 300) });
   const ask = req.topic === "free" ? (req.message ?? "").slice(0, 300) : `${TOPIC_PROMPTS[req.topic]}${req.message ? ` (${req.message.slice(0, 200)})` : ""}`;
@@ -202,6 +253,49 @@ export async function npcChat(req: NpcChatRequest, facts: NpcFacts): Promise<{ r
   const result = await run.finally(() => { waiting -= 1; });
   const reply = result ? { reply: result.text.replace(/^["“]|["”]$/g, "").trim(), source: "ollama" as const, model: result.model } : fallback();
   cache.set(key, { at: Date.now(), reply });
+  if (req.topic !== "memories") addMemory(req.npc.id, "visitor", req.topic === "free" ? `The Inspector asked me: "${(req.message ?? "").slice(0, 90)}"` : `The Inspector stopped to chat with me about ${req.topic === "job" ? "my job" : req.topic}.`, 1);
   if (cache.size > 200) cache.delete(cache.keys().next().value as string);
   return reply;
 }
+
+// ---- banter: short overheard exchanges between two staff, used for chat bubbles ----
+export type BanterRequest = { a: NpcBrief; b: NpcBrief; place?: string; topic?: string };
+const banterCache = new Map<string, { at: number; lines: Array<{ who: "a" | "b"; text: string }> }>();
+
+function banterTemplate(req: BanterRequest, weather: string | null) {
+  const pa = getPersona(req.a.id);
+  const pb = getPersona(req.b.id);
+  return [
+    { who: "a" as const, text: weather ? `Nice day to be inside, huh?` : `How's your day going, ${req.b.name}?` },
+    { who: "b" as const, text: `Can't complain. ${pb.catchphrase}` },
+    { who: "a" as const, text: `I'm just thinking about ${pa.loves[0]}.` },
+  ];
+}
+
+export async function npcBanter(req: BanterRequest) {
+  const key = `${req.a.id}|${req.b.id}|${req.topic ?? ""}|${Math.floor(Date.now() / 300_000)}`;
+  const hit = banterCache.get(key);
+  if (hit) return { lines: hit.lines, source: "cache" as const };
+  const weather = await currentWeather();
+  const pa = getPersona(req.a.id);
+  const pb = getPersona(req.b.id);
+  const brief = (n: NpcBrief, p: Persona) => `${n.name} (${n.title ?? "staff"}, mood ${n.mood ?? "okay"}, doing: ${n.action ?? "working"}; loves ${p.loves[0]}; hobby ${p.hobbies[0]}; favorite color ${p.favoriteColor}; catchphrase "${p.catchphrase}")`;
+  const calendar = calendarFacts().slice(0, 3).join(" ");
+  const system = `Write a short overheard exchange between two coworkers at a retro pixel-art grow facility in Lewiston, Maine. Output 3 or 4 lines, alternating, each starting with "A:" or "B:". Each line is under 14 words, casual, in character, no emojis, no markdown, no narration. Use only the facts given. Topic hint: ${req.topic ?? "whatever coworkers chat about: work, the day, weekend plans, hobbies, food, the weather, a holiday"}.`;
+  const user = `A is ${brief(req.a, pa)}. B is ${brief(req.b, pb)}. Place: ${req.place ?? "the hallway"}. ${calendar}${weather ? ` Weather: ${weather}.` : " Nobody has checked the weather."} ${req.a.recent?.[0] ? `A recently: ${req.a.recent[0]}.` : ""} ${req.b.recent?.[0] ? `B recently: ${req.b.recent[0]}.` : ""}`;
+  waiting += 1;
+  const run = chain.then(() => ollamaChat([{ role: "system", content: system }, { role: "user", content: user }], { model: process.env.NEUROLAB_NPC_MODEL, fast: true, maxTokens: 110, temperature: 0.95, timeoutMs: 45_000 }));
+  chain = run.catch(() => undefined);
+  const result = await run.finally(() => { waiting -= 1; });
+  let lines: Array<{ who: "a" | "b"; text: string }> = [];
+  if (result) {
+    lines = result.text.split(/\n+/).map((line) => line.trim().match(/^(A|B)\s*[:\-]\s*(.+)$/i)).filter((m): m is RegExpMatchArray => !!m).map((m) => ({ who: m[1].toLowerCase() as "a" | "b", text: m[2].replace(/^["“]|["”]$/g, "").slice(0, 90) })).slice(0, 4);
+  }
+  const source = lines.length >= 2 ? ("ollama" as const) : ("template" as const);
+  if (source === "template") lines = banterTemplate(req, weather);
+  banterCache.set(key, { at: Date.now(), lines });
+  if (banterCache.size > 200) banterCache.delete(banterCache.keys().next().value as string);
+  return { lines, source };
+}
+
+export { addMemory, memoriesFor };
