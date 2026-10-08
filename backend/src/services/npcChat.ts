@@ -97,6 +97,29 @@ export function getPersona(id: string): Persona {
   return persona;
 }
 
+const PERSONA_LIST_KEYS = ["hobbies", "likes", "dislikes", "loves", "hates"] as const;
+const PERSONA_TEXT_KEYS = ["favoriteFood", "pet", "home", "family", "weekend", "dream", "quirk", "music", "hometown", "favoriteColor", "favoriteArtist", "favoriteShow", "favoriteTeam", "maineThing", "commute", "relationship", "morning", "fear", "guiltyPleasure", "catchphrase"] as const;
+
+/** Keeps only known persona fields with sane types and lengths (lists may arrive as arrays or comma separated text). */
+export function sanitizePersona(input: unknown): Partial<Persona> {
+  const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of PERSONA_LIST_KEYS) {
+    const value = raw[key];
+    const items = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : undefined;
+    if (items) out[key] = items.map((item) => String(item).trim().slice(0, 80)).filter(Boolean).slice(0, 8);
+  }
+  for (const key of PERSONA_TEXT_KEYS) {
+    const value = raw[key];
+    if (typeof value === "string") out[key] = value.trim().slice(0, 140);
+  }
+  const month = Number(raw.birthdayMonth);
+  const day = Number(raw.birthdayDay);
+  if (Number.isInteger(month) && month >= 1 && month <= 12) out.birthdayMonth = month;
+  if (Number.isInteger(day) && day >= 1 && day <= 31) out.birthdayDay = day;
+  return out as Partial<Persona>;
+}
+
 export function updatePersona(id: string, patch: Partial<Persona>) {
   const merged = { ...getPersona(id), ...patch };
   db.prepare("INSERT OR REPLACE INTO npc_personas (id, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(id, JSON.stringify(merged));
@@ -104,16 +127,23 @@ export function updatePersona(id: string, patch: Partial<Persona>) {
 }
 
 // ---- weather (real, optional) ----
-let weatherCache: { at: number; text: string | null } | undefined;
+export type WeatherInfo = { text: string; tempF: number; summary: string };
+let weatherCache: { at: number; info: WeatherInfo | null } | undefined;
 const WEATHER_CODES: Record<number, string> = { 0: "clear skies", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "foggy", 48: "foggy", 51: "light drizzle", 53: "drizzle", 55: "heavy drizzle", 61: "light rain", 63: "rain", 65: "heavy rain", 71: "light snow", 73: "snow", 75: "heavy snow", 80: "rain showers", 81: "rain showers", 82: "heavy showers", 95: "thunderstorms", 96: "thunderstorms with hail", 99: "thunderstorms with hail" };
 
+/** Text version of the weather for prompts. */
 export async function currentWeather(): Promise<string | null> {
-  if (weatherCache && Date.now() - weatherCache.at < 10 * 60_000) return weatherCache.text;
+  return (await currentWeatherInfo())?.text ?? null;
+}
+
+/** Structured current weather (cached 10 minutes): prompt text plus temperature and a short summary like "light rain". */
+export async function currentWeatherInfo(): Promise<WeatherInfo | null> {
+  if (weatherCache && Date.now() - weatherCache.at < 10 * 60_000) return weatherCache.info;
   // Default location: Lewiston, Maine (override with NEUROLAB_WEATHER_LAT / LON / PLACE).
   const lat = Number(process.env.NEUROLAB_WEATHER_LAT || 44.1004);
   const lon = Number(process.env.NEUROLAB_WEATHER_LON || -70.2148);
   const place = process.env.NEUROLAB_WEATHER_PLACE || "Lewiston, Maine";
-  let text: string | null = null;
+  let info: WeatherInfo | null = null;
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
     try {
       const tz = encodeURIComponent(process.env.NEUROLAB_TZ || "America/New_York");
@@ -123,12 +153,14 @@ export async function currentWeather(): Promise<string | null> {
       if (c) {
         // The API returns local wall-clock times (no zone), so read the clock digits directly.
         const sun = (iso?: string) => { if (!iso) return "?"; const [h, m] = iso.slice(11, 16).split(":").map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`; };
-        text = `${WEATHER_CODES[c.weather_code ?? -1] ?? "mixed weather"}, ${Math.round(c.temperature_2m ?? 0)}°F (feels like ${Math.round(c.apparent_temperature ?? c.temperature_2m ?? 0)}°F), wind ${Math.round(c.wind_speed_10m ?? 0)} mph in ${place}; today's high ${Math.round(data.daily?.temperature_2m_max?.[0] ?? 0)}°F, low ${Math.round(data.daily?.temperature_2m_min?.[0] ?? 0)}°F; sunrise ${sun(data.daily?.sunrise?.[0])}, sunset ${sun(data.daily?.sunset?.[0])}`;
+        const summary = WEATHER_CODES[c.weather_code ?? -1] ?? "mixed weather";
+        const text = `${summary}, ${Math.round(c.temperature_2m ?? 0)}°F (feels like ${Math.round(c.apparent_temperature ?? c.temperature_2m ?? 0)}°F), wind ${Math.round(c.wind_speed_10m ?? 0)} mph in ${place}; today's high ${Math.round(data.daily?.temperature_2m_max?.[0] ?? 0)}°F, low ${Math.round(data.daily?.temperature_2m_min?.[0] ?? 0)}°F; sunrise ${sun(data.daily?.sunrise?.[0])}, sunset ${sun(data.daily?.sunset?.[0])}`;
+        info = { text, tempF: Math.round(c.temperature_2m ?? 0), summary };
       }
-    } catch { text = null; }
+    } catch { info = null; }
   }
-  weatherCache = { at: Date.now(), text };
-  return text;
+  weatherCache = { at: Date.now(), info };
+  return info;
 }
 
 // ---- prompt assembly ----
@@ -279,7 +311,11 @@ export async function npcBanter(req: BanterRequest) {
   const weather = await currentWeather();
   const pa = getPersona(req.a.id);
   const pb = getPersona(req.b.id);
-  const brief = (n: NpcBrief, p: Persona) => `${n.name} (${n.title ?? "staff"}, mood ${n.mood ?? "okay"}, doing: ${n.action ?? "working"}; loves ${p.loves[0]}; hobby ${p.hobbies[0]}; favorite color ${p.favoriteColor}; catchphrase "${p.catchphrase}")`;
+  const brief = (n: NpcBrief, p: Persona) => {
+    const memory = memoriesFor(n.id, 1)[0];
+    const birthday = daysUntilBirthday(p.birthdayMonth, p.birthdayDay);
+    return `${n.name} (${n.title ?? "staff"}, mood ${n.mood ?? "okay"}, doing: ${n.action ?? "working"}; loves ${p.loves[0]}; likes ${p.likes[0]}; hobby ${p.hobbies[0]}; favorite color ${p.favoriteColor}; catchphrase "${p.catchphrase}"${memory ? `; remembers: ${memory.text}` : ""}${birthday <= 3 ? `; birthday ${birthday === 0 ? "is today" : `in ${birthday} days`}` : ""})`;
+  };
   const calendar = calendarFacts().slice(0, 3).join(" ");
   const system = `Write a short overheard exchange between two coworkers at a retro pixel-art grow facility in Lewiston, Maine. Output 3 or 4 lines, alternating, each starting with "A:" or "B:". Each line is under 14 words, casual, in character, no emojis, no markdown, no narration. Use only the facts given. Topic hint: ${req.topic ?? "whatever coworkers chat about: work, the day, weekend plans, hobbies, food, the weather, a holiday"}.`;
   const user = `A is ${brief(req.a, pa)}. B is ${brief(req.b, pb)}. Place: ${req.place ?? "the hallway"}. ${calendar}${weather ? ` Weather: ${weather}.` : " Nobody has checked the weather."} ${req.a.recent?.[0] ? `A recently: ${req.a.recent[0]}.` : ""} ${req.b.recent?.[0] ? `B recently: ${req.b.recent[0]}.` : ""}`;

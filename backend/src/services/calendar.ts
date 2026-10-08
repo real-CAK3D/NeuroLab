@@ -118,3 +118,50 @@ export function daysUntilBirthday(month: number, day: number, date = new Date())
 export function formatBirthday(month: number, day: number) {
   return `${MONTHS[month - 1]} ${day}`;
 }
+
+// ---- structured snapshot for the dashboard header / decorations ----
+export type CalendarHoliday = { name: string; daysUntil: number; note: string };
+export type CalendarSnapshot = {
+  now: { iso: string; weekday: string; date: string; clock12: string };
+  season: string;
+  holidays: CalendarHoliday[];
+  decor: string | null;
+};
+
+/** Which seasonal decoration set the facility has up, by facility-local date. */
+export function decorFor(date = new Date()): string | null {
+  const p = localParts(date);
+  const today = dayNumber(p.year, p.month, p.day);
+  const md = p.month * 100 + p.day; // e.g. Oct 15 -> 1015
+  if (md >= 1015 && md <= 1101) return "halloween";
+  if (md >= 1115 && md <= 1128) return "thanksgiving";
+  if (md >= 1201 && md <= 1226) return "christmas";
+  if (md >= 1227 || md <= 102) return "newyear";
+  if (md >= 207 && md <= 214) return "valentines";
+  if (md >= 310 && md <= 317) return "stpatricks";
+  const e = easter(p.year);
+  const toEaster = dayNumber(p.year, e.month, e.day) - today;
+  if (toEaster >= 0 && toEaster <= 7) return "easter";
+  if (md >= 628 && md <= 705) return "fourth";
+  // Patriots' Day weekend: Saturday through the third Monday of April
+  const patriots = dayNumber(p.year, 4, nthWeekday(p.year, 4, 1, 3)) - today;
+  if (patriots >= 0 && patriots <= 2) return "patriots";
+  return null;
+}
+
+export function calendarSnapshot(date = new Date()): CalendarSnapshot {
+  const p = localParts(date);
+  const today = dayNumber(p.year, p.month, p.day);
+  const holidays: CalendarHoliday[] = [];
+  for (const holiday of [...holidaysForYear(p.year - 1), ...holidaysForYear(p.year), ...holidaysForYear(p.year + 1)]) {
+    const diff = dayNumber(holiday.year, holiday.month, holiday.day) - today;
+    if (diff >= -3 && diff <= 30) holidays.push({ name: holiday.name, daysUntil: diff, note: holiday.note });
+  }
+  holidays.sort((a, b) => a.daysUntil - b.daysUntil);
+  return {
+    now: { iso: date.toISOString(), weekday: p.weekday, date: `${MONTHS[p.month - 1]} ${p.day}, ${p.year}`, clock12: clockLabel(date) },
+    season: seasonOf(p.month),
+    holidays,
+    decor: decorFor(date),
+  };
+}

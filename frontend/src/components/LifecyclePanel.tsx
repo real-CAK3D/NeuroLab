@@ -1,7 +1,15 @@
 import { LIFE_GROW_ROOMS, LIFE_ROOM_NAMES, lifeStageCounts, type LifeState } from "../game/lifecycleLogic";
 
+export type LifecycleCalendar = {
+  dateText: string;
+  weatherText?: string;
+  decor: string | null;
+  holidays: Array<{ name: string; daysUntil: number }>;
+  birthdays: Array<{ name: string; days: number; label: string }>;
+};
+
 /** Compact Game Boy style readout of the backend crop lifecycle (facility sim clock, stage counts, inventory, recent log). */
-export function LifecyclePanel({ life, onClose }: { life?: LifeState; onClose: () => void }) {
+export function LifecyclePanel({ life, calendar, onClose }: { life?: LifeState; calendar?: LifecycleCalendar; onClose: () => void }) {
   const snap = life?.snap;
   return (
     <div className="lifecycle-panel" role="dialog" aria-label="Crop lifecycle" onClick={(event) => event.stopPropagation()}>
@@ -12,6 +20,19 @@ export function LifecyclePanel({ life, onClose }: { life?: LifeState; onClose: (
         </div>
         <button type="button" onClick={onClose}>CLOSE</button>
       </header>
+      {calendar ? (
+        <>
+          <h4>CALENDAR</h4>
+          <div className="lifecycle-log life-calendar">
+            <span>{calendar.dateText}{calendar.decor ? ` · ${calendar.decor.toUpperCase()} DECOR UP` : ""}</span>
+            {calendar.weatherText ? <span>WEATHER: {calendar.weatherText.split(";")[0].toUpperCase()}</span> : null}
+            {calendar.holidays.map((holiday) => <span key={holiday.name}>{holiday.name.toUpperCase()} {holiday.daysUntil === 0 ? "TODAY" : `IN ${holiday.daysUntil} DAY${holiday.daysUntil === 1 ? "" : "S"}`}</span>)}
+            {calendar.birthdays.length
+              ? calendar.birthdays.map((birthday) => <span key={`${birthday.name}-${birthday.label}`} className="is-birthday">BIRTHDAY: {birthday.name.toUpperCase()} {birthday.days === 0 ? "TODAY" : `${birthday.label} (IN ${birthday.days}D)`}</span>)
+              : <span>NO STAFF BIRTHDAYS IN THE NEXT 7 DAYS.</span>}
+          </div>
+        </>
+      ) : null}
       {!snap ? (
         <div className="lifecycle-clock">LIFECYCLE FEED NOT AVAILABLE. THE FLOOR KEEPS ITS DEMO LOOP.</div>
       ) : (

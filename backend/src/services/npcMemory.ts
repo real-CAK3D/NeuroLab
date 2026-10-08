@@ -27,6 +27,16 @@ export function addMemory(npcId: string, kind: string, text: string, importance 
   db.prepare(`DELETE FROM npc_memories WHERE npc_id = ? AND id NOT IN (SELECT id FROM npc_memories WHERE npc_id = ? ORDER BY importance DESC, at_ms DESC LIMIT ?)`).run(npcId, npcId, KEEP_PER_NPC);
 }
 
+/** Adds a memory unless the same kind+text was already filed within the window (default 12 h). Returns true when stored. */
+export function addMemoryOnce(npcId: string, kind: string, text: string, importance = 2, windowMs = 12 * 3_600_000) {
+  ensure();
+  const clipped = text.slice(0, 280);
+  const dup = db.prepare("SELECT 1 FROM npc_memories WHERE npc_id = ? AND kind = ? AND text = ? AND at_ms > ? LIMIT 1").get(npcId, kind, clipped, Date.now() - windowMs);
+  if (dup) return false;
+  addMemory(npcId, kind, clipped, importance);
+  return true;
+}
+
 export function relativeTime(thenMs: number, nowMs = Date.now()) {
   const minutes = Math.round((nowMs - thenMs) / 60_000);
   if (minutes < 2) return "just now";
@@ -51,7 +61,7 @@ export function memoriesFor(npcId: string, limit = 7) {
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .sort((a, b) => b.at - a.at)
-    .map((row) => ({ kind: row.kind, text: row.text, when: relativeTime(row.at), importance: row.importance }));
+    .map((row) => ({ kind: row.kind, text: row.text, when: relativeTime(row.at), at: row.at, importance: row.importance }));
 }
 
 const PROMOTION_TITLE = /manager|lead|senior|supervisor|head|chief|director|captain/i;

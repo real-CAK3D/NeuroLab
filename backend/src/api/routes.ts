@@ -11,7 +11,9 @@ import { db } from "../database/db";
 import { employeesQuery, reportsQuery, roomsQuery, tasksQuery } from "../database/queries";
 import { eventBus } from "../events/bus";
 import { getLifecycleSnapshot, getTimeScale, setTimeScale } from "../services/lifecycle";
-import { addMemory, getPersona, memoriesFor, npcBanter, npcChat, updatePersona, type BanterRequest, type NpcChatRequest, type NpcFacts } from "../services/npcChat";
+import { addMemory, currentWeatherInfo, getPersona, memoriesFor, npcBanter, npcChat, sanitizePersona, updatePersona, type BanterRequest, type NpcChatRequest, type NpcFacts } from "../services/npcChat";
+import { calendarSnapshot } from "../services/calendar";
+import { addMemoryOnce, syncRoster, type RosterEntry } from "../services/npcMemory";
 import { generateShiftReport, latestShiftReport, readHistory } from "../services/monitoring";
 
 const execFileAsync = promisify(execFile);
@@ -342,8 +344,24 @@ export function apiRouter(): Router {
   router.post("/npc/memories/:id", (req: Request, res: Response) => {
     const text = String(req.body?.text ?? "").trim();
     if (!text) return res.status(400).json({ error: "text is required" });
-    addMemory(String(req.params.id), String(req.body?.kind ?? "event").slice(0, 24), text, Math.min(5, Math.max(1, Number(req.body?.importance) || 2)));
+    const kind = String(req.body?.kind ?? "event").slice(0, 24);
+    const importance = Math.min(5, Math.max(1, Number(req.body?.importance) || 2));
+    // Dashboard-filed events (not hand-written notes) are de-duplicated for 12 hours so a reload never files them twice.
+    if (kind === "note") addMemory(String(req.params.id), kind, text, importance);
+    else addMemoryOnce(String(req.params.id), kind, text, importance);
     res.status(201).json({ memories: memoriesFor(String(req.params.id), 20) });
+  });
+
+  // Roster sync: the dashboard sends who works here (stable ids + displayed title/department) so promotions, transfers and hires are remembered.
+  router.post("/npc/roster", (req: Request, res: Response) => {
+    const raw = Array.isArray(req.body?.roster) ? (req.body.roster as unknown[]) : [];
+    const roster: RosterEntry[] = raw
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && !!(item as Record<string, unknown>).id)
+      .slice(0, 80)
+      .map((item) => ({ id: String(item.id).slice(0, 64), name: String(item.name ?? item.id).slice(0, 40), title: item.title ? String(item.title).slice(0, 60) : undefined, department: item.department ? String(item.department).slice(0, 40) : undefined }));
+    if (!roster.length) return res.status(400).json({ error: "roster must be a non-empty array of {id,name,title,department}" });
+    syncRoster(roster);
+    res.json({ ok: true, count: roster.length });
   });
 
   router.get("/npc/persona/:id", (req: Request, res: Response) => {
@@ -351,7 +369,13 @@ export function apiRouter(): Router {
   });
 
   router.put("/npc/persona/:id", (req: Request, res: Response) => {
-    res.json(updatePersona(String(req.params.id), req.body ?? {}));
+    res.json(updatePersona(String(req.params.id), sanitizePersona(req.body)));
+  });
+
+  // Date, season, nearby holidays, decoration set and structured weather for the dashboard header and ambience.
+  router.get("/calendar", async (_req: Request, res: Response) => {
+    const weather = await currentWeatherInfo();
+    res.json({ ...calendarSnapshot(), weather: weather ? { text: weather.text, tempF: weather.tempF, summary: weather.summary } : null });
   });
 
   router.get("/history", (req: Request, res: Response) => {

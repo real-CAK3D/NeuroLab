@@ -16,6 +16,14 @@ import {
 } from "../game/gen2FacilityData";
 import { gen2BossHotKeys, gen2BreakWindowAt, gen2ChatTopics, gen2DefaultSchedule, gen2FormatClock, gen2FormatClock12, gen2Hash01, gen2NormalizeSchedule, gen2OnShift, gen2ParseClock, gen2ScheduleBlock, gen2PerformanceBriefs, gen2ReportLogPath, gen2RoomOperations, gen2RoomVitals, gen2SimTraitFor, gen2WorkerIdentity, gen2WorkerProfiles, type Gen2RoomVital, type Gen2Schedule } from "../game/gen2OperationsData";
 import type { Gen2HotKey } from "../game/gen2OperationsData";
+import { AmbienceOverlay, BirthdayDecor, HolidayDecor, isNight } from "../life/decor";
+import { PersonaEditor, type PersonaDrafts } from "../life/PersonaEditor";
+import { useBirthdays, useLifeCalendar, useRosterSync } from "../life/useLifeData";
+import { chipText, holidayBadge, lifeNow, smallTalkLines, weatherKind } from "../life/calendarLogic";
+import { FRIEND_AT, RARE_AT, banterQueuedFor, isFriend, pairAffinity, pumpBanter, takeBanter, type BanterCandidate } from "../life/banterQueue";
+import { fileMemory } from "../life/lifeMemory";
+import { LIFE_DRY, lifeParam, putPersona, type Persona } from "../life/lifeApi";
+import { CELEBRATE_HOLD, LIFE_TALK, activeHold, activeMoment, setMoment } from "../life/moments";
 import { LifecyclePanel } from "./LifecyclePanel";
 import { WalkMode } from "../walk/WalkMode";
 import { TalkDialog } from "../talk/TalkDialog";
@@ -95,7 +103,7 @@ type ActivityScenario = "normal-shift" | "rd-failure-storm" | "sales-push" | "ma
 type ActivityRoomBadge = { label: string; tone: "ready" | "warn" | "busy" };
 
 type NpcNeeds = { energy: number; social: number; hunger: number; bladder: number };
-type ErrandKind = "coffee" | "water" | "fridge" | "microwave" | "bathroom" | "sit" | "phone" | "desk" | "seek" | "work";
+type ErrandKind = "coffee" | "water" | "fridge" | "microwave" | "bathroom" | "sit" | "phone" | "desk" | "seek" | "work" | "leave";
 type NpcErrand = {
   kind: ErrandKind;
   x: number;
@@ -106,8 +114,11 @@ type NpcErrand = {
   left: number;
   timeout: number;
   partnerId?: string;
+  /** Birthday gathering: ignores the break room's 3-person limit. */
+  party?: boolean;
 };
-type NpcChat = { with: string; left: number; say: string; side: "l" | "r" };
+/** `script`/`t` are set for AI banter: one entry per turn (empty when the partner speaks), TURN_TICKS ticks each. */
+type NpcChat = { with: string; left: number; say: string; side: "l" | "r"; script?: string[]; t?: number };
 type NpcSim = {
   needs: NpcNeeds;
   errand?: NpcErrand;
@@ -128,6 +139,10 @@ type NpcSim = {
   breakRetry: number;
   /** Event-driven lifecycle job (sterilize a room, carry a batch, ...). Paused by breaks and needs, dropped at shift end. */
   task?: NpcTask;
+  /** Was on shift at the previous tick (detects shift start / end). */
+  wasOn?: boolean;
+  /** Local day number on which the worker clocked out and walked to the screening-room door; they idle there until the next shift. */
+  parkedDay?: number;
 };
 /** A running lifecycle job: a list of stops (see TaskStop), the current stop, and what the worker carries. */
 type NpcTask = {
@@ -157,6 +172,8 @@ type NpcSimContext = {
   /** Lifecycle keys that are true right now ("phase:grow1:sterilizing", "stage:B-0001:trimming") and batch -> room. */
   lifeActive: ReadonlySet<string>;
   batchRoom: Record<string, string>;
+  /** True for real-time ticks (false while replaying saved time on load), so one-off bubbles are not spammed. */
+  live: boolean;
 };
 
 type LiveNpc = Gen2Npc & {
@@ -315,6 +332,97 @@ function persistLifeSeen(seen: Set<string>) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Staff "little life": birthdays, promotions, memories filed from floor events (see src/life/)
+// ---------------------------------------------------------------------------
+
+const BDAY_DONE_KEY = "gen2-life-bday-done-v1";
+const TITLES_KEY = "gen2-life-titles-v1";
+const PARTY_CAKE = { x: 79, y: 32 };
+const PROMOTION_TITLE = /manager|lead|senior|supervisor|head|chief|director|captain/i;
+const JOB_MEMORY_LABEL = /^(STERILIZE|MOP|HARVEST|PLANT|POT|TRIM|PACK|EXTRACT|PROMOTE)\b/;
+
+type PartyState = { id: string; dayKey: string; phase: "gather" | "sing"; startedAt: number; attendees: string[] };
+
+function readJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key: string, value: unknown) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // storage unavailable: the celebration may repeat after a reload
+  }
+}
+
+function dayKeyOf(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/** Sends the birthday guests to free tiles around the cake. Each gets a "seek" errand (no bubble, ignores the break room limit). */
+function assignPartyErrands(list: LiveNpc[], ids: string[]): LiveNpc[] {
+  const reach = getReach();
+  const breakRoom = gen2Rooms.find((room) => room.id === "break");
+  const doorX = breakRoom ? breakRoom.x + (breakRoom.doors[0]?.at ?? 0) : 0;
+  const spots: Spot[] = [];
+  for (const key of reach) {
+    const [x, y] = key.split(",").map(Number);
+    if (!isBreakRoomTile(x, y)) continue;
+    const distance = Math.abs(x - PARTY_CAKE.x) + Math.abs(y - PARTY_CAKE.y);
+    if (distance < 1 || distance > 6) continue;
+    if (breakRoom && y <= breakRoom.y + 2 && Math.abs(x - doorX) <= 2) continue; // keep the door clear
+    spots.push({ x, y, face: faceToward({ x, y }, PARTY_CAKE, "down"), roomId: "break" });
+  }
+  let out = list;
+  for (const id of ids) {
+    const index = out.findIndex((npc) => npc.id === id);
+    const npc = out[index];
+    if (!npc?.sim) continue;
+    const spot = pickSpot(spots, npc, out, id, PARTY_CAKE);
+    if (!spot) continue;
+    if (out === list) out = list.slice();
+    out[index] = { ...npc, pause: 0, sim: { ...npc.sim, chat: undefined, task: undefined, mode: "work", errand: { kind: "seek", x: spot.x, y: spot.y, face: spot.face, stage: "go", left: 260, timeout: 300, party: true }, via: undefined, legFor: -1 } };
+  }
+  return out;
+}
+
+/** Plausible pairs for an AI banter exchange: same room, same department or both in the break room, friends first. */
+function buildBanterCandidates(list: LiveNpc[], ctx: NpcSimContext, staffMap: Record<string, GrowOpsStaff>, logs: Record<string, { items: string[] }>): BanterCandidate[] {
+  const eligible = list.filter((npc) => npc.sim && npc.id !== "boss" && gen2OnShift(scheduleOf(npc, ctx), ctx.minute) && !isCriticalNow(npc, ctx) && !TALK_HOLD.has(npc.id));
+  const brief = (npc: LiveNpc) => {
+    const info = staffMap[npc.id] ?? defaultGrowOpsStaff(npc);
+    const last = logs[npc.id]?.items[logs[npc.id].items.length - 1]?.replace(/^[^:]+:\d\d [AP]M: /, "");
+    return { id: npc.id, name: info.name, title: info.title, department: info.department, mood: moodText(npc, info).toLowerCase(), action: npcDoingLabel(npc).toLowerCase(), recent: last ? [last] : undefined };
+  };
+  const out: BanterCandidate[] = [];
+  for (let i = 0; i < eligible.length; i += 1) {
+    for (let j = i + 1; j < eligible.length; j += 1) {
+      const a = eligible[i];
+      const b = eligible[j];
+      const roomA = roomAt(a.x, a.y)?.id;
+      const sameRoom = !!roomA && roomA === roomAt(b.x, b.y)?.id;
+      const sameDept = departmentOf(a) === departmentOf(b);
+      const breakBoundBoth = [a, b].every((npc) => isBreakRoomTile(npc.x, npc.y) || (npc.sim?.errand?.stage === "go" && isBreakRoomTile(npc.sim.errand.x, npc.sim.errand.y)));
+      if (!sameRoom && !sameDept && !breakBoundBoth) continue;
+      const close = Math.abs(a.x - b.x) + Math.abs(a.y - b.y) <= 6;
+      const score = (sameRoom ? 3 : 0) + (breakBoundBoth ? 3 : 0) + (sameDept ? 1.5 : 0) + (close ? 3 : 0) + pairAffinity(a.id, b.id, sameDept) * 2 - banterQueuedFor(a.id, b.id) * 2;
+      out.push({ a: brief(a), b: brief(b), place: breakBoundBoth ? "the break room" : sameRoom ? roomLabel(roomA as string).toLowerCase() : "the hallway", score });
+    }
+  }
+  return out.sort((x, y) => y.score - x.score).slice(0, 12);
+}
+
+function releaseParty(list: LiveNpc[], ids: string[]): LiveNpc[] {
+  const set = new Set(ids);
+  return list.map((npc) => (set.has(npc.id) && npc.sim?.errand?.party ? { ...npc, sim: { ...npc.sim, errand: { ...npc.sim.errand, left: Math.min(npc.sim.errand.left, 10) } } } : npc));
+}
+
 export function Gen2FacilityDashboard() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [fitZoom, setFitZoom] = useState(0.62);
@@ -379,6 +487,204 @@ export function Gen2FacilityDashboard() {
   const [talk, setTalk] = useState<{ npcId: string; x: number; y: number; interrupt?: string } | undefined>();
   const talkNpc = talk ? npcs.find((npc) => npc.id === talk.npcId) : undefined;
   const workLogRef = useRef<Record<string, { sig?: WorkerSig; items: string[] }>>({});
+
+  // ---- staff life: calendar, weather, birthdays, promotions, memories, AI banter (see src/life/) ----
+  const { info: lifeCal, now: lifeClockDate } = useLifeCalendar();
+  const staffRef = useRef(staff);
+  staffRef.current = staff;
+  const staffIds = npcs.map((npc) => npc.id);
+  const { birthdays, setBirthday } = useBirthdays(staffIds);
+  useRosterSync(npcs.map((npc) => {
+    const info = staff[npc.id] ?? defaultGrowOpsStaff(npc);
+    return { id: npc.id, name: info.name, title: info.title, department: info.department };
+  }));
+  const lifeDecor = lifeCal?.decor ?? null;
+  const lifeNight = isNight(lifeClockDate);
+  const lifeWeather = weatherKind(lifeCal?.weather ?? null);
+  const holidayChip = lifeCal ? holidayBadge(lifeCal) : undefined;
+  const birthdayMock = lifeParam("birthdayMock");
+  const todayKey = dayKeyOf(lifeClockDate);
+  const todayBirthdayIds = staffIds.filter((id) => (birthdayMock ? id === birthdayMock : birthdays[id]?.m === lifeClockDate.getMonth() + 1 && birthdays[id]?.d === lifeClockDate.getDate()));
+  const todayBirthdayKey = todayBirthdayIds.join("|");
+  const todayBirthdayRef = useRef<string[]>([]);
+  todayBirthdayRef.current = todayBirthdayIds;
+  const partyRef = useRef<PartyState | null>(null);
+  const memoryTrackRef = useRef<Record<string, { task?: { key: string; label: string; idx: number; total: number }; crit?: boolean }>>({});
+  const birthdayStations = useMemo(() => todayBirthdayIds.map((id) => {
+    const home = staff[id]?.stationRoomId ?? gen2WorkerProfiles[id]?.stationRoomId;
+    const spot = home ? favoriteSpots(id, home)[0] : undefined;
+    const live = npcsRef.current.find((npc) => npc.id === id);
+    return { id, x: spot?.x ?? live?.x ?? PARTY_CAKE.x, y: spot?.y ?? live?.y ?? PARTY_CAKE.y };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [todayBirthdayKey, staff]);
+  const upcomingBirthdays = useMemo(() => {
+    const today = new Date(lifeClockDate.getFullYear(), lifeClockDate.getMonth(), lifeClockDate.getDate());
+    return staffIds.flatMap((id) => {
+      const entry = birthdayMock === id ? { m: lifeClockDate.getMonth() + 1, d: lifeClockDate.getDate() } : birthdays[id];
+      if (!entry) return [];
+      let next = new Date(today.getFullYear(), entry.m - 1, entry.d);
+      if (next < today) next = new Date(today.getFullYear() + 1, entry.m - 1, entry.d);
+      const days = Math.round((next.getTime() - today.getTime()) / 86_400_000);
+      return days <= 7 ? [{ name: staff[id]?.name ?? humanizeNpcId(id), days, label: next.toLocaleDateString("en-US", { month: "short", day: "numeric" }).toUpperCase() }] : [];
+    }).sort((a, b) => a.days - b.days);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [birthdays, staff, todayKey, staffIds.join("|")]);
+  const memoryReal = (id: string) => !LIFE_MOCK && !!staffRef.current[id];
+
+  // weather / holiday small talk for the canned sprite chat
+  useEffect(() => {
+    LIFE_TALK.lines = smallTalkLines(lifeCal);
+  }, [lifeCal]);
+
+  // Prefetch AI banter for one plausible pair every ~60-90 s (sooner when the break room fills up); never blocks the sim.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const list = npcsRef.current;
+      const ctx = withClock(simContextRef.current, Date.now());
+      const breakers = list.filter((npc) => isBreakRoomTile(npc.x, npc.y) || (npc.sim?.errand && npc.sim.errand.stage === "go" && isBreakRoomTile(npc.sim.errand.x, npc.sim.errand.y)));
+      pumpBanter(() => buildBanterCandidates(list, ctx, staffRef.current, workLogRef.current), breakers.length >= 2);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Notable floor events become memories: a finished lifecycle job, responding to the alarm. Deduped by event key.
+  useEffect(() => {
+    const ctx = withClock(simContextRef.current, Date.now());
+    for (const npc of npcs) {
+      const record = (memoryTrackRef.current[npc.id] ??= {});
+      const task = npc.sim?.task;
+      if (task) record.task = { key: task.key, label: task.label, idx: task.idx, total: task.stops.length };
+      else if (record.task) {
+        const finished = record.task;
+        record.task = undefined;
+        if (finished.idx >= finished.total - 1 && JOB_MEMORY_LABEL.test(finished.label)) fileMemory(npc.id, `job:${finished.key}`, "job", `I finished a job on the floor: ${finished.label.toLowerCase()}.`, 2, memoryReal(npc.id));
+      }
+      const critical = isCriticalNow(npc, ctx);
+      if (critical && !record.crit) {
+        if (npc.id === "researcher" || npc.id === "rdSafety") fileMemory(npc.id, `fire:${ctx.day}`, "fire", "I responded when the fire alarm went off in the R&D labs.", 3, memoryReal(npc.id));
+        else fileMemory(npc.id, `alert:${ctx.day}`, "security", "I handled a security alert on the floor and everything turned out fine.", 2, memoryReal(npc.id));
+      }
+      record.crit = critical;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [npcs]);
+
+  // Promotion / new-role moment: compare each worker's title with the one remembered in localStorage.
+  const titleSignature = npcs.map((npc) => `${npc.id}=${(staff[npc.id] ?? defaultGrowOpsStaff(npc)).title}`).join("|");
+  useEffect(() => {
+    const stored = readJson<Record<string, string>>(TITLES_KEY, {});
+    const next = { ...stored };
+    const changes: Array<{ id: string; from: string; to: string }> = [];
+    for (const npc of npcsRef.current) {
+      const title = (staffRef.current[npc.id] ?? defaultGrowOpsStaff(npc)).title;
+      if (stored[npc.id] === undefined) next[npc.id] = title;
+      else if (stored[npc.id] !== title) {
+        changes.push({ id: npc.id, from: stored[npc.id], to: title });
+        next[npc.id] = title;
+      }
+    }
+    writeJson(TITLES_KEY, next);
+    if (!changes.length) return;
+    // (not cancelled on cleanup: the titles were already stored above, so a React dev double-mount must not swallow the moment)
+    window.setTimeout(() => changes.forEach((change) => celebratePromotion(change.id, change.from, change.to)), 900);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [titleSignature]);
+
+  function celebratePromotion(id: string, from: string, to: string) {
+    const list = npcsRef.current;
+    const hero = list.find((npc) => npc.id === id);
+    if (!hero) return;
+    const promoted = PROMOTION_TITLE.test(to) && !PROMOTION_TITLE.test(from);
+    const name = staffRef.current[id]?.name ?? humanizeNpcId(id);
+    const now = Date.now();
+    setMoment(id, `${promoted ? "PROMOTED" : "NEW ROLE"}: ${to.toUpperCase().slice(0, 26)}`, 7500, { mark: true, tone: "promo" });
+    CELEBRATE_HOLD.set(id, { face: "down", until: now + 8000 });
+    const ctx = withClock(simContextRef.current, now);
+    const neighbors = list
+      .filter((other) => other.id !== id && other.sim && gen2OnShift(scheduleOf(other, ctx), ctx.minute) && !isCriticalNow(other, ctx) && !TALK_HOLD.has(other.id))
+      .map((other) => ({ other, dist: Math.abs(other.x - hero.x) + Math.abs(other.y - hero.y) }))
+      .filter((item) => item.dist <= 14)
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, 2);
+    neighbors.forEach(({ other }, index) => {
+      window.setTimeout(() => {
+        setMoment(other.id, "CONGRATS!", 3800, { tone: "cheer" });
+        CELEBRATE_HOLD.set(other.id, { face: faceToward(other, hero, other.dir), until: Date.now() + 5200 });
+      }, 1300 + index * 900);
+    });
+    setIntercomNotice(`${promoted ? "PROMOTION" : "NEW ROLE"}: ${name.toUpperCase()} IS NOW ${to.toUpperCase()}.`);
+  }
+
+  // Birthday gathering: mid-shift on the birthday, the worker's coworkers join them in the break room (once per day, persisted).
+  useEffect(() => {
+    if (LIFE_DRY) (window as unknown as Record<string, unknown>).__lifeCelebrate = (id: string, from: string, to: string) => celebratePromotion(id, from, to);
+    if (LIFE_DRY) (window as unknown as Record<string, unknown>).__lifeSetNpcs = setNpcs; // dev aid for scripted-chat tests
+    if (LIFE_DRY) (window as unknown as Record<string, unknown>).__lifeParty = () => ({ party: partyRef.current, today: todayBirthdayRef.current, checks: todayBirthdayRef.current.map((id) => { const npc = npcsRef.current.find((item) => item.id === id); const ctx = withClock(simContextRef.current, Date.now()); return npc ? { task: npc.sim?.task?.label, critical: isCriticalNow(npc, ctx), onShift: gen2OnShift(scheduleOf(npc, ctx), ctx.minute), minute: ctx.minute } : "missing"; }), npcs: npcsRef.current.filter((npc) => partyRef.current?.attendees.includes(npc.id)).map((npc) => `${npc.id}@${npc.x},${npc.y} ${npc.sim?.errand ? `${npc.sim.errand.kind}/${npc.sim.errand.stage}/${npc.sim.errand.party ? "P" : "-"}->${npc.sim.errand.x},${npc.sim.errand.y} left${npc.sim.errand.left} to${npc.sim.errand.timeout}` : "no-errand"}`) });
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const date = lifeNow();
+      const dayKey = dayKeyOf(date);
+      const list = npcsRef.current;
+      const ctx = withClock(simContextRef.current, now);
+      const party = partyRef.current;
+      const mock = !!lifeParam("birthdayMock");
+      if (!party) {
+        const done = readJson<Record<string, string[]>>(BDAY_DONE_KEY, {});
+        for (const id of todayBirthdayRef.current) {
+          if ((done[dayKey] ?? []).includes(id)) continue;
+          const npc = list.find((item) => item.id === id);
+          if (!npc?.sim || npc.sim.task || isCriticalNow(npc, ctx)) continue;
+          const schedule = scheduleOf(npc, ctx);
+          if (!gen2OnShift(schedule, ctx.minute)) continue;
+          if (!mock) {
+            const allDay = schedule.shiftStart === schedule.shiftEnd || (schedule.shiftStart === 0 && schedule.shiftEnd >= 1440);
+            const middle = allDay ? 14 * 60 : (schedule.shiftStart + schedule.shiftEnd) / 2;
+            if (ctx.minute < middle || ctx.minute > middle + 150) continue;
+          }
+          const sameDept = (other: LiveNpc) => departmentOf(other) === departmentOf(npc);
+          const guests = list
+            .filter((other) => other.id !== id && other.sim && other.id !== "boss" && !other.sim.task && !TALK_HOLD.has(other.id) && gen2OnShift(scheduleOf(other, ctx), ctx.minute) && !isCriticalNow(other, ctx))
+            .map((other) => ({ id: other.id, score: (sameDept(other) ? 2 : 0) + pairAffinity(id, other.id, sameDept(other)) * 2 + Math.random() }))
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 5)
+            .map((item) => item.id);
+          const attendees = [id, ...guests];
+          writeJson(BDAY_DONE_KEY, { [dayKey]: [...(done[dayKey] ?? []), id] });
+          partyRef.current = { id, dayKey, phase: "gather", startedAt: now, attendees };
+          setNpcs((current) => assignPartyErrands(current, attendees));
+          setIntercomNotice(`BREAK ROOM: SURPRISE BIRTHDAY GATHERING FOR ${(staffRef.current[id]?.name ?? humanizeNpcId(id)).toUpperCase()}!`);
+          break;
+        }
+        return;
+      }
+      const arrived = party.attendees.filter((id) => {
+        const npc = list.find((item) => item.id === id);
+        const errand = npc?.sim?.errand;
+        return !!npc && !!errand?.party && errand.stage === "use" && npc.x === errand.x && npc.y === errand.y;
+      });
+      if (party.phase === "gather") {
+        if (arrived.length >= Math.max(2, Math.ceil(party.attendees.length * 0.7)) || now - party.startedAt > 60_000) {
+          party.phase = "sing";
+          party.startedAt = now;
+          const hero = staffRef.current[party.id]?.name ?? humanizeNpcId(party.id);
+          const enabled = memoryReal(party.id);
+          arrived.forEach((id, index) => {
+            if (id === party.id) return;
+            window.setTimeout(() => setMoment(id, `HAPPY BIRTHDAY ${hero.toUpperCase().slice(0, 12)}!`, 3600, { tone: "party" }), index * 900);
+            fileMemory(id, `bdayparty:${party.dayKey}:${party.id}`, "birthday", `I was at ${hero}'s birthday gathering in the break room.`, 2, memoryReal(id));
+          });
+          window.setTimeout(() => setMoment(party.id, "THANKS, EVERYONE!", 4500, { tone: "party" }), Math.max(3400, arrived.length * 900 + 600));
+          fileMemory(party.id, `bday:${party.dayKey}`, "birthday", "My coworkers gathered in the break room with a cake for my birthday.", 3, enabled);
+        }
+      } else if (now - party.startedAt > 11_000) {
+        const attendees = party.attendees;
+        partyRef.current = null;
+        setNpcs((current) => releaseParty(current, attendees));
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Per-worker rolling "what did you do lately" log, derived from changes in the sim state (rooms, breaks, chats, lifecycle jobs, trips, incidents).
   useEffect(() => {
@@ -532,6 +838,12 @@ export function Gen2FacilityDashboard() {
       .map((npc) => ({ npc, fromRoomId: previousRooms[npc.id], toRoomId: nextRooms[npc.id] }))
       .filter((arrival) => arrival.toRoomId && arrival.toRoomId !== arrival.fromRoomId);
     previousNpcRoomsRef.current = nextRooms;
+    for (const arrival of arrivals) {
+      if (arrival.toRoomId !== "rd1" && arrival.toRoomId !== "rd2") continue;
+      const day = withClock(simContextRef.current, Date.now()).day;
+      if (arrival.toRoomId === "rd1") fileMemory(arrival.npc.id, `rd1:${day}`, "research", "I carried an extract sample into the R&D lab for testing.", 1, memoryReal(arrival.npc.id));
+      else fileMemory(arrival.npc.id, `rd2:${day}`, "research", "I took a batch through the R&D test room today.", 1, memoryReal(arrival.npc.id));
+    }
     if (arrivals.length) {
       setActivityState((current) => {
         const next = advanceActivityState(current, arrivals, productionPhase, incidentPhase);
@@ -962,7 +1274,8 @@ export function Gen2FacilityDashboard() {
       .map((other) => ({ name: staff[other.id]?.name ?? npcName(other.id), doing: npcDoingLabel(other).toLowerCase() }));
     return {
       npc: {
-        id: live.id,
+        // ?lifeDry=1: talk to a throwaway "zz-test-" twin so the chat's own memory / roster writes never touch real staff
+        id: LIFE_DRY ? `zz-test-${live.id}` : live.id,
         name: profile.name,
         title: profile.title,
         department: profile.department,
@@ -979,7 +1292,7 @@ export function Gen2FacilityDashboard() {
         recent: recent.length ? recent : [`has been working around ${roomName} since the visitor arrived`],
         upcoming: upcoming.slice(0, 6),
       },
-      roster: npcs.map((other) => {
+      roster: LIFE_DRY ? [] : npcs.map((other) => {
         const info = staff[other.id] ?? defaultGrowOpsStaff(other);
         return { id: other.id, name: info.name, title: info.title, department: info.department };
       }),
@@ -1031,6 +1344,8 @@ export function Gen2FacilityDashboard() {
             <span>RETRO OVERWORLD DASHBOARD</span>
           </div>
           <div className="gb-stats">
+            <span className="life-chip" title={lifeCal?.weather?.text ?? "Today's date and the weather in Lewiston, Maine"}>{chipText(lifeClockDate, lifeCal?.weather ?? null)}</span>
+            {holidayChip ? <span className="life-badge" title="Next holiday">{holidayChip}</span> : null}
             <span>CLOCK {clockText}</span>
             {life ? <span title="Facility crop lifecycle clock">LIFE {life.snap.simLabel} X{life.snap.scale}</span> : null}
             <button type="button" className={lifecycleOpen ? "is-active" : ""} onClick={() => setLifecycleOpen((open) => !open)}>LIFECYCLE</button>
@@ -1044,7 +1359,7 @@ export function Gen2FacilityDashboard() {
 
         <div ref={viewportRef} style={clockHandStyle()} className={`gen2-viewport ${focusedRoom && !walk.active ? "is-detail" : ""} ${walk.active ? "is-walk" : ""} ${walk.active && walk.view === "fp" ? "is-walk-fp" : ""} ${walk.active && walk.full ? "is-walk-full" : ""}`} onClick={() => setContextMenu(undefined)} onContextMenu={(event) => event.preventDefault()}>
           {!focusedRoom || walk.active ? (
-            <div ref={boardRef} className="gen2-board" style={{ width: worldWidth, height: worldHeight, transform: overviewTransform }}>
+            <div ref={boardRef} className={`gen2-board ${lifeNight ? "life-night" : ""} ${lifeWeather !== "clear" ? `life-wx-${lifeWeather}` : ""}`} style={{ width: worldWidth, height: worldHeight, transform: overviewTransform }}>
               {gen2Hallways.map((hall, index) => (
                 <HallView key={`hall-${index}`} hall={hall} />
               ))}
@@ -1054,6 +1369,9 @@ export function Gen2FacilityDashboard() {
               {gen2Props.map((prop, index) => (
                 <PropView key={`${prop.kind}-${index}`} prop={prop} roomVitals={roomVitals} productionPhase={productionPhase} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} onSelect={setSelection} onContextMenu={openContextMenu} onTerminalOpen={openTerminal} onFacilityEditor={() => openGrowOps("facility")} />
               ))}
+              <HolidayDecor decor={lifeDecor} />
+              <BirthdayDecor stations={birthdayStations} cake={todayBirthdayIds.length ? PARTY_CAKE : null} />
+              <AmbienceOverlay date={lifeClockDate} />
               {npcs.map((npc) => (
                 <NpcView key={npc.id} npc={npc} staff={staff[npc.id]} incidentPhase={incidentPhase} incidentTargetRoom={incidentTargetRoom} selected={staffBattleId === npc.id} onSelect={setSelection} onStaffOpen={openStaffBattle} onTalk={openTalk} onStaffEdit={(npc) => openGrowOps("staff", npc.id)} onContextMenu={openContextMenu} />
               ))}
@@ -1098,8 +1416,8 @@ export function Gen2FacilityDashboard() {
           {talk && talkNpc ? <TalkDialog key={talk.npcId} speaker={(staff[talk.npcId]?.name ?? humanizeNpcId(talk.npcId)).toUpperCase()} getBrief={() => buildTalkBrief(talk.npcId)} interrupt={talk.interrupt} onStats={() => { const target = talkNpc; closeTalk(); openStaffBattle(target); }} onClose={closeTalk} /> : null}
           {dialog ? <PokemonDialog dialog={dialog} onChoose={chooseDialogOption} onHover={(index) => setDialog((current) => current ? { ...current, selectedIndex: index } : current)} /> : null}
           {activityLabOpen ? <ActivityLabDrawer activityState={activityState} intercomNotice={intercomNotice} onRunControl={runActivityControl} onRunScenario={runActivityScenario} onSaveActivity={saveActivityCheckpoint} onUndoActivity={undoActivityCheckpoint} onClose={() => setActivityLabOpen(false)} isSavingActivity={isSavingActivity} activityHistoryCount={activityHistoryCount} /> : null}
-          {lifecycleOpen ? <LifecyclePanel life={life} onClose={() => setLifecycleOpen(false)} /> : null}
-          {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} focusStaffId={growOpsFocusStaffId} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} onRestoreStaff={(nextStaff) => setStaff(Object.fromEntries(Object.entries(nextStaff).map(([id, item]) => [id, cleanGrowOpsStaff({ ...(item as GrowOpsStaff), id })])))} onPreviewRoute={(id) => { setHighlightRouteId(id); setStaffBattleId(id); }} onClearRoutePreview={() => setHighlightRouteId(undefined)} /> : null}
+          {lifecycleOpen ? <LifecyclePanel life={life} calendar={{ dateText: `${lifeClockDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`.toUpperCase(), weatherText: lifeCal?.weather?.text, holidays: (lifeCal?.holidays ?? []).filter((item) => item.daysUntil >= 0).slice(0, 4), birthdays: upcomingBirthdays, decor: lifeDecor }} onClose={() => setLifecycleOpen(false)} /> : null}
+          {growOpsOpen ? <GrowOpsPanel initialTab={growOpsInitialTab} focusStaffId={growOpsFocusStaffId} npcs={npcs} staff={staff} vacantDuties={vacantDuties} onPersonaSaved={(id, persona) => setBirthday(id, persona.birthdayMonth, persona.birthdayDay)} onClose={() => setGrowOpsOpen(false)} onSave={saveGrowOpsStaff} onRemove={removeGrowOpsStaff} onRestoreStaff={(nextStaff) => setStaff(Object.fromEntries(Object.entries(nextStaff).map(([id, item]) => [id, cleanGrowOpsStaff({ ...(item as GrowOpsStaff), id })])))} onPreviewRoute={(id) => { setHighlightRouteId(id); setStaffBattleId(id); }} onClearRoutePreview={() => setHighlightRouteId(undefined)} /> : null}
         </div>
 
         <div className="gen2-info-row">
@@ -1508,6 +1826,7 @@ function GrowOpsPanel({
   npcs,
   staff,
   vacantDuties,
+  onPersonaSaved,
   onClose,
   onSave,
   onRemove,
@@ -1520,6 +1839,7 @@ function GrowOpsPanel({
   npcs: LiveNpc[];
   staff: Record<string, GrowOpsStaff>;
   vacantDuties: VacantDuty[];
+  onPersonaSaved?: (id: string, persona: Persona) => void;
   onClose: () => void;
   onSave: (nextStaff: GrowOpsStaff, dutyId?: string) => void;
   onRemove: (id: string) => void;
@@ -1539,6 +1859,24 @@ function GrowOpsPanel({
   const [staffSnapshotStatus, setStaffSnapshotStatus] = useState("Staff snapshots not loaded yet.");
   const [isApplyingStaff, setIsApplyingStaff] = useState(false);
   const selectedNpc = npcs.find((npc) => npc.id === selectedId);
+  const personaDrafts = useRef<PersonaDrafts>(new Map());
+  const [personaRevision, setPersonaRevision] = useState(0);
+
+  /** Writes the personality edits (if any) for a worker; called by SAVE and APPLY STAFF SNAPSHOT. */
+  async function savePersona(id: string): Promise<string> {
+    const patch = personaDrafts.current.get(id);
+    if (!patch) return "";
+    try {
+      const saved = await putPersona(id, patch);
+      if (!saved) return " PERSONALITY NOT WRITTEN (?lifeDry=1).";
+      personaDrafts.current.delete(id);
+      onPersonaSaved?.(id, saved);
+      setPersonaRevision((value) => value + 1);
+      return " PERSONALITY SAVED.";
+    } catch {
+      return " PERSONALITY SAVE FAILED.";
+    }
+  }
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -1575,6 +1913,7 @@ function GrowOpsPanel({
     onSave(next, isCreating ? dutyId : undefined);
     setIsCreating(false);
     setSavedMessage(`${next.name.toUpperCase()} SAVED.`);
+    void savePersona(next.id).then((note) => { if (note) setSavedMessage(`${next.name.toUpperCase()} SAVED.${note}`); });
   }
 
   function setField<K extends keyof GrowOpsStaff>(key: K, value: GrowOpsStaff[K]) {
@@ -1619,6 +1958,7 @@ function GrowOpsPanel({
       setStaffSnapshotStatus(`Applied staff snapshot ${state.current?.id ?? "unknown"}. Undo points: ${state.history.length}.`);
       setDraft(next);
       setIsCreating(false);
+      void savePersona(next.id);
     } catch (error) {
       setStaffSnapshotStatus(`Staff apply failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1732,6 +2072,7 @@ function GrowOpsPanel({
             </div>
             <span className="grow-ops-schedule-note">SHIFT 00:00-00:00 = ALL DAY. BREAKS WAIT UP TO 12 MIN IF THE BREAK ROOM IS FULL (MAX 3).</span>
           </div>
+          <PersonaEditor staffId={selectedId} staffName={draft.name} staffTitle={draft.title} isNew={isCreating} drafts={personaDrafts.current} revision={personaRevision} />
           <div className="grow-ops-actions">
             <button type="submit" disabled={isApplyingStaff}>SAVE</button>
             <button type="button" onClick={applyStaffSnapshot} disabled={isApplyingStaff}>APPLY STAFF SNAPSHOT</button>
@@ -2283,7 +2624,9 @@ function NpcView({
   const task = source.sim?.task;
   const taskStop = task?.stops[task.idx];
   const working = !!task && !errand && task.stage === "use" && !!taskStop;
-  const bubbleText = incidentBubble(source, incidentPhase, incidentTargetRoom)
+  const moment = activeMoment(source.id);
+  const bubbleText = moment?.text
+    ?? incidentBubble(source, incidentPhase, incidentTargetRoom)
     ?? chat?.say
     ?? (working ? taskStop?.say : undefined)
     ?? (errand?.stage === "use" ? ERRAND_TAGS[errand.kind] : undefined)
@@ -2314,7 +2657,8 @@ function NpcView({
       }
     >
       {selected ? <span className="gen2-route-marker" /> : null}
-      {bubbleText ? <span className={`gen2-bubble ${chat ? `is-chat chat-${chat.side}` : ""}`}>{bubbleText}</span> : null}
+      {moment?.mark ? <span className="life-mark" aria-hidden="true">!</span> : null}
+      {bubbleText ? <span className={`gen2-bubble ${moment ? `life-moment tone-${moment.tone ?? "cheer"}` : chat ? `is-chat chat-${chat.side} ${chat.script ? "is-banter" : ""}` : ""}`}>{bubbleText}</span> : null}
       <span className={`gen2-npc role-${source.role} face-${npc.dir} step-${npc.stepFrame} activity-${working ? "busy" : npcActivity(source)} ${seated ? "is-seated" : ""}`} style={staffStyle(staff)} />
       {cargo ? <span className={`npc-cargo cargo-${cargo}`} /> : null}
       {working && taskStop?.act ? <span className={`npc-fx ${taskStop.act === "spray" ? "fx-spray" : taskStop.act === "mop" ? "fx-mop" : "fx-work"}`} /> : null}
@@ -2869,7 +3213,7 @@ function persistNpcs(npcs: LiveNpc[]) {
   window.localStorage.setItem(NPC_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), npcs: sanitizeNpcs(npcs, walkable), removedBaseIds }));
 }
 
-const EMPTY_SIM_CONTEXT: NpcSimContext = { incidentPhase: 0, stress: {}, hot: [], alerts: 0, schedules: {}, homes: {}, minute: 12 * 60, abs: 0, day: 0, lifeActive: new Set<string>(), batchRoom: {} };
+const EMPTY_SIM_CONTEXT: NpcSimContext = { incidentPhase: 0, stress: {}, hot: [], alerts: 0, schedules: {}, homes: {}, minute: 12 * 60, abs: 0, day: 0, lifeActive: new Set<string>(), batchRoom: {}, live: false };
 
 function buildSimContext(vitals: RoomVitals, incidentPhase: number, staff: Record<string, GrowOpsStaff>, lifecycle?: LifecycleSnapshot): NpcSimContext {
   const stress: Record<string, number> = {};
@@ -2902,6 +3246,7 @@ function withClock(ctx: NpcSimContext, now: number): NpcSimContext {
     minute: date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60,
     abs: Math.floor(now / 60000),
     day: Math.floor((now - date.getTimezoneOffset() * 60000) / 86400000),
+    live: Math.abs(Date.now() - now) < 2500,
   };
 }
 
@@ -2915,6 +3260,9 @@ function clockMinuteNow() {
 // ---------------------------------------------------------------------------
 
 const MANAGER_IDS = new Set(["cultManager", "opsManager", "salesRep"]);
+/** Where staff clock out (the hall outside the screening room's door) and the length of one banter turn in sim ticks (~3 s). */
+const EXIT_TILE = { x: 96, y: 34 };
+const BANTER_TURN_TICKS = 7;
 const BATHROOM_THRESHOLD = 78;
 const DESPERATE_THRESHOLD = 96;
 const WORK_KINDS: Gen2Prop["kind"][] = ["desk", "terminal", "table", "trimTable", "rack", "machine", "vat", "plantBed", "tray", "plant", "cutPlant", "dryRack", "shelf", "crate", "barrel", "sack", "soil", "conveyor", "experiment", "centrifuge", "microscope", "glassware", "scale", "printer", "hood", "display", "pottingMix", "cabinet", "condenser", "humidifier", "fan"];
@@ -3092,7 +3440,7 @@ function finiteOr(value: unknown, fallback: number, min = 0, max = 100) {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, Number(value))) : fallback;
 }
 
-const ERRAND_KINDS: ErrandKind[] = ["coffee", "water", "fridge", "microwave", "bathroom", "sit", "phone", "desk", "seek", "work"];
+const ERRAND_KINDS: ErrandKind[] = ["coffee", "water", "fridge", "microwave", "bathroom", "sit", "phone", "desk", "seek", "work", "leave"];
 const DIRECTIONS: Gen2Direction[] = ["down", "up", "left", "right"];
 
 function coerceSim(value: unknown, id: string): NpcSim {
@@ -3127,7 +3475,7 @@ function coerceSim(value: unknown, id: string): NpcSim {
       }
       : undefined,
     chat: chat && typeof chat.with === "string" && typeof chat.say === "string"
-      ? { with: chat.with, left: finiteOr(chat.left, 4, 0, 30), say: chat.say.slice(0, 40), side: chat.side === "r" ? "r" : "l" }
+      ? { with: chat.with, left: finiteOr(chat.left, 4, 0, 60), say: chat.say.slice(0, 80), side: chat.side === "r" ? "r" : "l", script: Array.isArray(chat.script) ? chat.script.filter((line): line is string => typeof line === "string").map((line) => line.slice(0, 80)).slice(0, 6) : undefined, t: finiteOr(chat.t, 0, 0, 80) }
       : undefined,
     chatCd: finiteOr(raw.chatCd, 0, 0, 600),
     errandCd: finiteOr(raw.errandCd, 0, 0, 300),
@@ -3139,6 +3487,8 @@ function coerceSim(value: unknown, id: string): NpcSim {
     lastBreak: typeof raw.lastBreak === "string" ? raw.lastBreak.slice(0, 24) : "",
     breakUntil: Number.isFinite(raw.breakUntil) ? Number(raw.breakUntil) : 0,
     breakRetry: finiteOr(raw.breakRetry, 0, 0, 60),
+    wasOn: typeof raw.wasOn === "boolean" ? raw.wasOn : undefined,
+    parkedDay: Number.isFinite(raw.parkedDay) ? Number(raw.parkedDay) : undefined,
   };
 }
 
@@ -3183,6 +3533,7 @@ function chatAvailable(npc: LiveNpc, ctx: NpcSimContext) {
   if (isCriticalNow(npc, ctx) || visibleCargo(npc, ctx.incidentPhase)) return false;
   if (isBathroomTile(npc.x, npc.y)) return false;
   if (sim.errand && sim.errand.stage !== "use" && sim.errand.kind !== "seek") return false;
+  if (sim.errand?.party && sim.errand.stage !== "use") return false; // still walking to the birthday gathering
   return true;
 }
 
@@ -3212,6 +3563,8 @@ function buildChatLines(a: LiveNpc, b: LiveNpc, ctx: NpcSimContext): [string, st
   if (roomId === "break") options.push(...topics.breakRoom, ...topics.breakRoom);
   const hotLines = ctx.hot.flatMap((id) => topics.telemetryByRoom[id] ?? []);
   if (hotLines.length) options.push(...hotLines, ...hotLines);
+  // weather and the next holiday are good small talk (lines come from the calendar poll)
+  if (LIFE_TALK.lines.length) options.push(...LIFE_TALK.lines, ...LIFE_TALK.lines);
   if (a.role === "science" || b.role === "science" || a.role === "security") options.push(...topics.fireDrill);
   return [pick(options), pick(topics.reply)];
 }
@@ -3235,13 +3588,30 @@ function startChats(list: LiveNpc[], ctx: NpcSimContext): LiveNpc[] {
       if (simA.recent[b.id] || simB.recent[a.id]) continue;
       const chatty = (gen2SimTraitFor(a.id).chatty + gen2SimTraitFor(b.id).chatty) / 2;
       const wantsChat = simA.needs.social >= 55 || simB.needs.social >= 55;
-      const chance = Math.min(0.9, 0.2 * chatty * (wantsChat ? 2.2 : 1) * chatSetting(a, b, ctx));
+      // Friends (same pair hash the backend uses for coworker opinions) chat more and longer; some coworkers rarely talk.
+      const sameDept = departmentOf(a) === departmentOf(b);
+      const affinity = pairAffinity(a.id, b.id, sameDept);
+      const friends = affinity >= FRIEND_AT;
+      const affinityMul = friends ? 1.6 : affinity <= RARE_AT ? 0.3 : 0.7 + affinity * 0.5;
+      const chance = Math.min(0.9, 0.2 * chatty * (wantsChat ? 2.2 : 1) * chatSetting(a, b, ctx) * affinityMul);
       if (Math.random() > chance) continue;
       const [lineA, lineB] = buildChatLines(a, b, ctx);
       const sideA: "l" | "r" = a.x < b.x ? "l" : a.x > b.x ? "r" : a.id < b.id ? "l" : "r";
-      const length = 7 + Math.floor(Math.random() * 6);
-      const startA: NpcSim = { ...simA, errand: simA.errand?.stage === "use" ? simA.errand : undefined, chat: { with: b.id, left: length, say: lineA, side: sideA }, recent: { ...simA.recent, [b.id]: 420 } };
-      const startB: NpcSim = { ...simB, errand: simB.errand?.stage === "use" ? simB.errand : undefined, chat: { with: a.id, left: length, say: lineB, side: sideA === "l" ? "r" : "l" }, recent: { ...simB.recent, [a.id]: 420 } };
+      let length = 7 + Math.floor(Math.random() * 6) + (friends ? 4 + Math.floor(Math.random() * 4) : 0);
+      // An AI-written exchange that was prefetched for this pair: alternating bubbles, one speaker at a time.
+      const banter = ctx.live ? takeBanter(a.id, b.id) : undefined;
+      let chatA: NpcChat = { with: b.id, left: length, say: lineA, side: sideA };
+      let chatB: NpcChat = { with: a.id, left: length, say: lineB, side: sideA === "l" ? "r" : "l" };
+      if (banter?.length) {
+        const turns = banter.slice(0, 4);
+        length = turns.length * BANTER_TURN_TICKS + 2;
+        const scriptFor = (id: string) => turns.map((turn) => (turn.speaker === id ? turn.text : ""));
+        chatA = { with: b.id, left: length, say: scriptFor(a.id)[0], side: sideA, script: scriptFor(a.id), t: 0 };
+        chatB = { with: a.id, left: length, say: scriptFor(b.id)[0], side: sideA === "l" ? "r" : "l", script: scriptFor(b.id), t: 0 };
+      }
+      const cooldown = friends ? 260 : affinity <= RARE_AT ? 700 : 420;
+      const startA: NpcSim = { ...simA, errand: simA.errand?.stage === "use" ? simA.errand : undefined, chat: chatA, recent: { ...simA.recent, [b.id]: cooldown } };
+      const startB: NpcSim = { ...simB, errand: simB.errand?.stage === "use" ? simB.errand : undefined, chat: chatB, recent: { ...simB.recent, [a.id]: cooldown } };
       if (out === list) out = list.slice();
       out[i] = { ...a, dir: faceToward(a, b, a.dir), stepFrame: 0, sim: startA };
       out[j] = { ...b, dir: faceToward(b, a, b.dir), stepFrame: 0, sim: startB };
@@ -3282,7 +3652,7 @@ function tickSim(sim: NpcSim, npc: LiveNpc, ctx: NpcSimContext): NpcSim {
 }
 
 function spotTaken(spot: { x: number; y: number }, all: LiveNpc[], selfId: string) {
-  return all.some((other) => other.id !== selfId && ((other.x === spot.x && other.y === spot.y) || (other.sim?.errand && other.sim.errand.x === spot.x && other.sim.errand.y === spot.y && other.sim.errand.kind !== "seek") || (other.sim?.task?.spot && other.sim.task.spot.x === spot.x && other.sim.task.spot.y === spot.y)));
+  return all.some((other) => other.id !== selfId && ((other.x === spot.x && other.y === spot.y) || (other.sim?.errand && other.sim.errand.x === spot.x && other.sim.errand.y === spot.y && (other.sim.errand.kind !== "seek" || other.sim.errand.party)) || (other.sim?.task?.spot && other.sim.task.spot.x === spot.x && other.sim.task.spot.y === spot.y)));
 }
 
 function pickSpot(spots: Spot[], from: { x: number; y: number }, all: LiveNpc[], selfId: string, near?: { x: number; y: number }): Spot | undefined {
@@ -3298,7 +3668,7 @@ function breakBound(all: LiveNpc[], excludingId: string) {
 }
 
 function errandUseTicks(kind: ErrandKind, onBreak = false) {
-  const ranges: Record<ErrandKind, [number, number]> = { coffee: [8, 14], water: [5, 9], fridge: [8, 13], microwave: [10, 16], bathroom: [7, 12], sit: [14, 24], phone: [10, 18], desk: [14, 26], seek: [1, 1], work: [60, 200] };
+  const ranges: Record<ErrandKind, [number, number]> = { coffee: [8, 14], water: [5, 9], fridge: [8, 13], microwave: [10, 16], bathroom: [7, 12], sit: [14, 24], phone: [10, 18], desk: [14, 26], seek: [1, 1], work: [60, 200], leave: [10, 14] };
   const [min, max] = ranges[kind];
   const base = min + Math.floor(Math.random() * (max - min + 1));
   return onBreak && (kind === "sit" || kind === "phone") ? base * 3 : base;
@@ -3329,7 +3699,8 @@ function breakErrand(npc: LiveNpc, sim: NpcSim, all: LiveNpc[], slotId: string |
   const spotsFor: Record<string, Spot[]> = { coffee: stations.coffee, water: stations.water, fridge: stations.fridge, microwave: stations.microwave, sit: stations.breakSeat, phone: stations.breakSeat };
   const kinds = [...pool].sort(() => Math.random() - 0.5);
   const company = all.filter((other) => other.id !== npc.id && isBreakRoomTile(other.x, other.y));
-  const near = company.length && Math.random() < 0.6 ? pick(company) : undefined;
+  const friendsHere = company.filter((other) => isFriend(npc.id, other.id, departmentOf(npc) === departmentOf(other)));
+  const near = friendsHere.length && Math.random() < 0.8 ? pick(friendsHere) : company.length && Math.random() < 0.6 ? pick(company) : undefined;
   for (const kind of kinds) {
     const spot = pickSpot(spotsFor[kind] ?? [], npc, all, npc.id, near && (kind === "sit" || kind === "phone" || kind === "water" || kind === "coffee") ? near : undefined);
     if (spot) return { kind, x: spot.x, y: spot.y, face: spot.face, seat: spot.seat, stage: "go", left: errandUseTicks(kind, true), timeout: 140 };
@@ -3367,6 +3738,23 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
   // 0. The player is talking to this worker: stand still facing them (an incident still calls the worker away).
   const talkFace = TALK_HOLD.get(npc.id);
   if (talkFace && !critical) return standStill(npc, sim.chat ? { ...sim, chat: undefined } : sim, talkFace);
+  // 0b. A celebration (promotion, "Congrats!") holds the worker for a few seconds, same idea.
+  const cheerFace = activeHold(npc.id);
+  if (cheerFace && !critical) return standStill(npc, sim.chat ? { ...sim, chat: undefined } : sim, cheerFace);
+
+  // 0c. Shift edges: greet the day, and clock out by walking to the screening-room door (then idle there until the next shift).
+  if (sim.wasOn !== onShift) {
+    const edge = sim.wasOn !== undefined && ctx.live && schedule.shiftStart !== schedule.shiftEnd && npc.id !== "boss";
+    sim = { ...sim, wasOn: onShift, parkedDay: onShift ? undefined : sim.parkedDay };
+    if (edge && onShift) setMoment(npc.id, "MORNING!", 3500, { tone: "hello" });
+    if (edge && !onShift && !critical && !sim.task) {
+      const door = pickSpot(getStations().hallTiles.filter((tile) => Math.abs(tile.x - EXIT_TILE.x) + Math.abs(tile.y - EXIT_TILE.y) <= 6).map((tile) => ({ ...tile, face: "left" as Gen2Direction })), npc, allNpcs, npc.id, EXIT_TILE);
+      if (door) {
+        sim = { ...sim, parkedDay: ctx.day, errand: { kind: "leave", x: door.x, y: door.y, face: "left", stage: "go", left: 14, timeout: 260 }, via: undefined, legFor: -1 };
+        npc = { ...npc, pause: 0 };
+      }
+    }
+  }
 
   // 1. Conversations: stand, face partner, resume after a few seconds.
   if (sim.chat) {
@@ -3375,7 +3763,13 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
     if (!partnerTalking || sim.chat.left <= 0 || critical) {
       sim = { ...sim, chat: undefined, chatCd: 70 + Math.floor(Math.random() * 120), needs: { ...sim.needs, social: Math.max(0, sim.needs.social - 55) } };
     } else {
-      return standStill(npc, { ...sim, chat: { ...sim.chat, left: sim.chat.left - 1 } }, partner ? faceToward(npc, partner, npc.dir) : npc.dir);
+      let chat: NpcChat = { ...sim.chat, left: sim.chat.left - 1 };
+      if (chat.script) {
+        // banter: each turn lasts BANTER_TURN_TICKS ticks (~3 s); only the current speaker shows a bubble
+        const t = (chat.t ?? 0) + 1;
+        chat = { ...chat, t, say: chat.script[Math.min(Math.floor(t / BANTER_TURN_TICKS), chat.script.length - 1)] ?? "" };
+      }
+      return standStill(npc, { ...sim, chat }, partner ? faceToward(npc, partner, npc.dir) : npc.dir);
     }
   }
 
@@ -3386,7 +3780,9 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
   if (!onShift && sim.mode === "trip") sim = { ...sim, mode: "work", tripIdx: 0 };
   if (critical && sim.mode === "work") sim = { ...sim, tripCd: 0 };
   if (onShift && !onBreak && npc.id !== "boss" && !critical && sim.mode === "work" && sim.breakRetry <= 0) {
-    const slot = gen2BreakWindowAt(schedule, ctx.minute);
+    let slot = gen2BreakWindowAt(schedule, ctx.minute);
+    // Friends take breaks together: join a friend who is already in the break room up to 12 minutes before your own slot.
+    if (!slot && allNpcs.some((other) => other.id !== npc.id && isOnBreak(other, ctx) && isBreakRoomTile(other.x, other.y) && isFriend(npc.id, other.id, departmentOf(npc) === departmentOf(other)))) slot = gen2BreakWindowAt(schedule, ctx.minute + 12);
     const key = slot ? `${ctx.day}:${slot.id}` : "";
     if (slot && sim.lastBreak !== key && !visibleCargo(npc, ctx.incidentPhase)) {
       const dept = departmentOf(npc);
@@ -3437,6 +3833,7 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
   if (!sim.errand && sim.task && sim.mode === "work" && !onBreak) return advanceTask(npc, sim, walkable, allNpcs, ctx);
   if (!sim.errand && sim.mode === "work" && !onBreak) {
     if (npc.pause > 0) return { ...npc, pause: npc.pause - 1, stepFrame: 0, sim };
+    if (!onShift && sim.parkedDay !== undefined) return standStill(npc, sim, "left", 0); // clocked out: waiting by the exit until the next shift
     const errand = workErrand(npc, sim, allNpcs, ctx, onShift);
     if (errand) sim = { ...sim, errand, via: undefined, legFor: -1 };
   }
@@ -3470,7 +3867,7 @@ function advanceNpc(npc: LiveNpc, walkable: Set<string>, allNpcs: LiveNpc[], ctx
     if (!next) return standStill(npc, { ...progressed, errand: undefined, errandCd: 40 });
     const enteringBath = isBathroomTile(next.x, next.y) && !isBathroomTile(npc.x, npc.y);
     const enteringBreak = isBreakRoomTile(next.x, next.y) && !isBreakRoomTile(npc.x, npc.y);
-    if ((enteringBath && bathroomOccupied(allNpcs, npc.id)) || (enteringBreak && breakRoomCount(allNpcs, npc.id) >= 3)) return standStill(npc, progressed);
+    if ((enteringBath && bathroomOccupied(allNpcs, npc.id)) || (enteringBreak && !live.party && breakRoomCount(allNpcs, npc.id) >= 3)) return standStill(npc, progressed);
     if (trait.pace < 1 && Math.random() > trait.pace) return standStill(npc, progressed);
     return { ...npc, x: next.x, y: next.y, dir: directionTo(npc.x, npc.y, next.x, next.y), stepFrame: npc.stepFrame === 1 ? 2 : 1, sim: progressed };
   }
@@ -4409,6 +4806,7 @@ const ERRAND_PAST: Partial<Record<ErrandKind, string>> = {
   phone: "checked their phone on a break",
   desk: "typed up some notes at a desk",
   seek: "went looking for company",
+  leave: "clocked out and headed for the exit",
 };
 
 function diffWorkerSig(prev: WorkerSig | undefined, next: WorkerSig): string[] {
@@ -4430,7 +4828,7 @@ function diffWorkerSig(prev: WorkerSig | undefined, next: WorkerSig): string[] {
 /** Workers the player is talking to right now (id -> facing). advanceNpc holds them still until the conversation ends. */
 const TALK_HOLD = new Map<string, Gen2Direction>();
 
-const ERRAND_TAGS: Record<ErrandKind, string> = { coffee: "COF", water: "H2O", fridge: "YUM", microwave: "BZZ", bathroom: "", sit: "ZZ", phone: "TXT", desk: "TYP", seek: "", work: "" };
+const ERRAND_TAGS: Record<ErrandKind, string> = { coffee: "COF", water: "H2O", fridge: "YUM", microwave: "BZZ", bathroom: "", sit: "ZZ", phone: "TXT", desk: "TYP", seek: "", work: "", leave: "SEE YA!" };
 
 const ERRAND_LABELS: Record<ErrandKind, [string, string]> = {
   coffee: ["HEADING FOR COFFEE", "POURING COFFEE"],
@@ -4443,6 +4841,7 @@ const ERRAND_LABELS: Record<ErrandKind, [string, string]> = {
   desk: ["GOING TO DESK", "TYPING AT DESK"],
   seek: ["LOOKING FOR COMPANY", "LOOKING FOR COMPANY"],
   work: ["WALKING TO STATION", "WORKING AT STATION"],
+  leave: ["HEADING OUT FOR THE DAY", "SAYING GOODNIGHT"],
 };
 
 function scheduleBlockFor(npc: LiveNpc, staff?: GrowOpsStaff) {
@@ -4461,6 +4860,7 @@ function scheduleBlockText(npc: LiveNpc, staff?: GrowOpsStaff) {
 function npcDoingLabel(npc: LiveNpc) {
   const sim = npc.sim;
   if (sim?.chat) return `CHATTING WITH ${npcName(sim.chat.with).toUpperCase()}`;
+  if (sim?.errand?.party) return sim.errand.stage === "use" ? "AT A BIRTHDAY GATHERING IN THE BREAK ROOM" : "HEADING TO A BIRTHDAY GATHERING";
   if (sim?.errand?.kind === "work" && sim.errand.stage === "use" && sim.errand.seat) return "WORKING AT DESK";
   if (sim?.errand) return ERRAND_LABELS[sim.errand.kind][sim.errand.stage === "use" ? 1 : 0];
   if (sim?.mode === "trip") return npc.pause > 0 ? "AT HANDOFF STOP" : "ON A DELIVERY TRIP";
